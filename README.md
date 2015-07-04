@@ -44,3 +44,6 @@ This has some interesting side effects:
   supports receive synchronization events. However, it should be much faster in
   loops than its more general `select`.
 
+Finally, much of the semantics applied in this crate were directly inspired by
+Go's channels.
+
