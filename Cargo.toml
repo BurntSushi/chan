@@ -1,0 +1,8 @@
+[package]
+name = "chan"
+version = "0.1.0"  #:version
+authors = ["Andrew Gallant <jamslam@gmail.com>"]
+
+[dependencies]
+rand = "0.3"
+uuid = "0.1"
