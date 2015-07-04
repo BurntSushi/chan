@@ -6,7 +6,6 @@ a (possible empty) fixed size buffer.
 extern crate rand;
 extern crate uuid;
 
-use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::ops;
@@ -53,7 +52,7 @@ impl<'a, T: Channel> Channel for &'a T {
 #[derive(Debug)]
 pub struct SyncChannel<T>(Arc<SyncInner<T>>);
 
-struct Notifier(Mutex<RefCell<HashMap<Uuid, Arc<Condvar>>>>);
+struct Notifier(Mutex<HashMap<Uuid, Arc<Condvar>>>);
 
 #[derive(Debug)]
 enum SyncInner<T> {
@@ -66,7 +65,7 @@ struct Unbuffered<T> {
     nwaiting: AtomicUsize,
     cond: Condvar,
     sender: Mutex<()>,
-    val: Mutex<RefCell<UnbufferedValue<T>>>,
+    val: Mutex<UnbufferedValue<T>>,
 }
 
 #[derive(Debug)]
@@ -79,7 +78,7 @@ struct Buffered<T> {
     notify: Notifier,
     cap: usize,
     cond: Condvar,
-    ring: Mutex<RefCell<Ring<T>>>,
+    ring: Mutex<Ring<T>>,
 }
 
 #[derive(Debug)]
@@ -98,10 +97,10 @@ impl<T> SyncChannel<T> {
                 nwaiting: AtomicUsize::new(0),
                 cond: Condvar::new(),
                 sender: Mutex::new(()),
-                val: Mutex::new(RefCell::new(UnbufferedValue {
+                val: Mutex::new(UnbufferedValue {
                     val: None,
                     closed: false,
-                })),
+                }),
             })
         } else {
             let mut queue = Vec::with_capacity(size);
@@ -110,12 +109,12 @@ impl<T> SyncChannel<T> {
                 notify: Notifier::new(),
                 cap: size,
                 cond: Condvar::new(),
-                ring: Mutex::new(RefCell::new(Ring {
+                ring: Mutex::new(Ring {
                     queue: queue,
                     pos: 0,
                     len: 0,
                     closed: false,
-                })),
+                }),
             })
         };
         SyncChannel(Arc::new(inner))
@@ -124,19 +123,18 @@ impl<T> SyncChannel<T> {
 
 impl Notifier {
     fn new() -> Notifier {
-        Notifier(Mutex::new(RefCell::new(HashMap::new())))
+        Notifier(Mutex::new(HashMap::new()))
     }
 
     fn notify(&self) {
         let notify = self.0.lock().unwrap();
-        for condvar in notify.borrow().values() {
+        for condvar in notify.values() {
             condvar.notify_all();
         }
     }
 
     fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid {
-        let notify = self.0.lock().unwrap();
-        let mut notify = notify.borrow_mut();
+        let mut notify = self.0.lock().unwrap();
         for _ in 0..10 {
             let key = Uuid::new_v4();
             if !notify.contains_key(&key) {
@@ -148,8 +146,8 @@ impl Notifier {
     }
 
     fn unsubscribe(&self, key: &Uuid) {
-        let notify = self.0.lock().unwrap();
-        notify.borrow_mut().remove(key);
+        let mut notify = self.0.lock().unwrap();
+        notify.remove(key);
     }
 }
 
@@ -222,10 +220,10 @@ impl<T> Buffered<T> {
         // We *need* two of these checks. This is here because if the
         // channel is already closed, then the condition variable may
         // never be woken up again, and thus, we'll be dead-locked.
-        if ring.borrow().closed {
+        if ring.closed {
             panic!("cannot send on a closed channel");
         }
-        while ring.borrow().len == self.cap {
+        while ring.len == self.cap {
             if try {
                 return Err(val);
             }
@@ -235,10 +233,10 @@ impl<T> Buffered<T> {
         // closed while we were waiting for the queue to empty. And we
         // absolutely cannot abide adding to the queue if the channel
         // has been closed.
-        if ring.borrow().closed {
+        if ring.closed {
             panic!("cannot send on a closed channel");
         }
-        ring.borrow_mut().push(val);
+        ring.push(val);
         self.cond.notify_all();
         self.notify.notify();
         Ok(())
@@ -246,8 +244,8 @@ impl<T> Buffered<T> {
 
     fn recv(&self, try: bool) -> Result<Option<T>, ()> {
         let mut ring = self.ring.lock().unwrap();
-        while ring.borrow().len == 0 {
-            if ring.borrow().closed {
+        while ring.len == 0 {
+            if ring.closed {
                 return Ok(None);
             }
             if try {
@@ -255,15 +253,15 @@ impl<T> Buffered<T> {
             }
             ring = self.cond.wait(ring).unwrap();
         }
-        let val = ring.borrow_mut().pop();
+        let val = ring.pop();
         self.cond.notify_all();
         self.notify.notify();
         Ok(Some(val))
     }
 
     fn close(&self) {
-        let ring = self.ring.lock().unwrap();
-        ring.borrow_mut().closed = true;
+        let mut ring = self.ring.lock().unwrap();
+        ring.closed = true;
         self.cond.notify_all();
         self.notify.notify();
     }
@@ -300,10 +298,10 @@ impl<T> Unbuffered<T> {
             // receivers that could make progress have made progress, and the
             // rest are blocked. Therefore, `val` must be `None`.
             let mut val = self.val.lock().unwrap();
-            if val.borrow().closed {
+            if val.closed {
                 panic!("cannot send on a closed channel");
             }
-            val.borrow_mut().val = Some(send_val);
+            val.val = Some(send_val);
             self.cond.notify_all();
             self.notify.notify();
             // At this point, any blocked receivers have woken up and will race
@@ -311,7 +309,7 @@ impl<T> Unbuffered<T> {
             // until a receiver has retrieved the value.
             // If there are no blocked receivers, then we continue blocking
             // until there is one that grabs the value.
-            while val.borrow().val.is_some() {
+            while val.val.is_some() {
                 // It's possible we could wake up here by the broadcast from
                 // `close`, but that's OK: the value was added to the queue
                 // before `close` was called, which means a receiver can still
@@ -331,8 +329,8 @@ impl<T> Unbuffered<T> {
 
     fn recv(&self, try: bool) -> Result<Option<T>, ()> {
         let mut val = self.val.lock().unwrap();
-        while val.borrow().val.is_none() {
-            if val.borrow().closed {
+        while val.val.is_none() {
+            if val.closed {
                 return Ok(None);
             }
             if try {
@@ -342,15 +340,15 @@ impl<T> Unbuffered<T> {
             val = self.cond.wait(val).unwrap();
             self.nwaiting.fetch_sub(1, Ordering::SeqCst);
         }
-        let recv_val = val.borrow_mut().val.take().unwrap();
+        let recv_val = val.val.take().unwrap();
         self.cond.notify_all();
         self.notify.notify();
         Ok(Some(recv_val))
     }
 
     fn close(&self) {
-        let val = self.val.lock().unwrap();
-        val.borrow_mut().closed = true;
+        let mut val = self.val.lock().unwrap();
+        val.closed = true;
         // If there are any blocked receivers, this will wake them up and
         // force them to return.
         self.cond.notify_all();
@@ -375,7 +373,6 @@ impl<C: Channel> Iterator for Iter<C> {
 impl fmt::Debug for Notifier {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let notify = self.0.lock().unwrap();
-        let notify = notify.borrow();
         writeln!(f, "Notifier({:?})", notify.keys().collect::<Vec<_>>())
     }
 }
@@ -383,12 +380,11 @@ impl fmt::Debug for Notifier {
 impl<T: fmt::Debug> fmt::Debug for Unbuffered<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let val = self.val.lock().unwrap();
-        let val = val.borrow();
         try!(writeln!(f, "Unbuffered {{"));
         try!(writeln!(f, "    notify: {:?}", self.notify));
         try!(writeln!(f, "    nwaiting: {:?}",
                       self.nwaiting.load(Ordering::SeqCst)));
-        try!(writeln!(f, "    val: {:?}", val));
+        try!(writeln!(f, "    val: {:?}", *val));
         try!(writeln!(f, "}}"));
         Ok(())
     }
@@ -397,11 +393,10 @@ impl<T: fmt::Debug> fmt::Debug for Unbuffered<T> {
 impl<T: fmt::Debug> fmt::Debug for Buffered<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let ring = self.ring.lock().unwrap();
-        let ring = ring.borrow();
         try!(writeln!(f, "Buffered {{"));
         try!(writeln!(f, "    notify: {:?}", self.notify));
         try!(writeln!(f, "    cap: {:?}", self.cap));
-        try!(writeln!(f, "    ring: {:?}", ring));
+        try!(writeln!(f, "    ring: {:?}", *ring));
         try!(writeln!(f, "}}"));
         Ok(())
     }
@@ -413,7 +408,7 @@ pub struct AsyncChannel<T>(Arc<AsyncInner<T>>);
 struct AsyncInner<T> {
     notify: Notifier,
     cond: Condvar,
-    queue: Mutex<RefCell<AsyncQueue<T>>>,
+    queue: Mutex<AsyncQueue<T>>,
 }
 
 struct AsyncQueue<T> {
@@ -426,17 +421,17 @@ impl<T> AsyncChannel<T> {
         AsyncChannel(Arc::new(AsyncInner {
             notify: Notifier::new(),
             cond: Condvar::new(),
-            queue: Mutex::new(RefCell::new(AsyncQueue {
+            queue: Mutex::new(AsyncQueue {
                 queue: VecDeque::with_capacity(1024),
                 closed: false,
-            })),
+            }),
         }))
     }
 
     fn _recv(&self, try: bool) -> Result<Option<T>, ()> {
         let mut queue = self.0.queue.lock().unwrap();
-        while queue.borrow().queue.len() == 0 {
-            if queue.borrow().closed {
+        while queue.queue.len() == 0 {
+            if queue.closed {
                 return Ok(None);
             }
             if try {
@@ -444,7 +439,7 @@ impl<T> AsyncChannel<T> {
             }
             queue = self.0.cond.wait(queue).unwrap();
         }
-        let val = queue.borrow_mut().queue.pop_front().unwrap();
+        let val = queue.queue.pop_front().unwrap();
         self.0.cond.notify_all();
         self.0.notify.notify();
         Ok(Some(val))
@@ -459,8 +454,8 @@ impl<T> Channel for AsyncChannel<T> {
     }
 
     fn try_send(&self, val: T) -> Result<(), T> {
-        let queue = self.0.queue.lock().unwrap();
-        queue.borrow_mut().queue.push_back(val);
+        let mut queue = self.0.queue.lock().unwrap();
+        queue.queue.push_back(val);
         self.0.cond.notify_all();
         self.0.notify.notify();
         Ok(())
@@ -475,8 +470,8 @@ impl<T> Channel for AsyncChannel<T> {
     }
 
     fn close(&self) {
-        let queue = self.0.queue.lock().unwrap();
-        queue.borrow_mut().closed = true;
+        let mut queue = self.0.queue.lock().unwrap();
+        queue.closed = true;
         self.0.cond.notify_all();
         self.0.notify.notify();
     }
@@ -503,7 +498,6 @@ impl<T> Clone for AsyncChannel<T> {
 impl<T: fmt::Debug> fmt::Debug for AsyncInner<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let queue = self.queue.lock().unwrap();
-        let queue = queue.borrow();
         try!(writeln!(f, "AsyncInner {{"));
         try!(writeln!(f, "    notify: {:?}", self.notify));
         try!(writeln!(f, "    closed: {:?}", queue.closed));
@@ -518,21 +512,21 @@ pub struct WaitGroup(Arc<WaitGroupInner>);
 
 struct WaitGroupInner {
     cond: Condvar,
-    count: Mutex<Cell<i32>>,
+    count: Mutex<i32>,
 }
 
 impl WaitGroup {
     pub fn new() -> WaitGroup {
         WaitGroup(Arc::new(WaitGroupInner {
             cond: Condvar::new(),
-            count: Mutex::new(Cell::new(0)),
+            count: Mutex::new(0),
         }))
     }
 
     pub fn add(&self, delta: i32) {
-        let count = self.0.count.lock().unwrap();
-        count.set(count.get() + delta);
-        assert!(count.get() >= 0);
+        let mut count = self.0.count.lock().unwrap();
+        *count += delta;
+        assert!(*count >= 0);
         self.0.cond.notify_all();
     }
 
@@ -542,7 +536,7 @@ impl WaitGroup {
 
     pub fn wait(&self) {
         let mut count = self.0.count.lock().unwrap();
-        while count.get() > 0 {
+        while *count > 0 {
             count = self.0.cond.wait(count).unwrap();
         }
     }
@@ -551,7 +545,7 @@ impl WaitGroup {
 impl fmt::Debug for WaitGroup {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let count = self.0.count.lock().unwrap();
-        write!(f, "WaitGroup {{ count: {:?} }}", count.get())
+        write!(f, "WaitGroup {{ count: {:?} }}", *count)
     }
 }
 
