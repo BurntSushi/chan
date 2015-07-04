@@ -2,6 +2,13 @@
 name = "chan"
 version = "0.1.1"  #:version
 authors = ["Andrew Gallant <jamslam@gmail.com>"]
+description = "Multi-producer, multi-consumer channels with select."
+documentation = "http://burntsushi.net/rustdoc/chan/"
+homepage = "https://github.com/BurntSushi/chan"
+repository = "https://github.com/BurntSushi/chan"
+readme = "README.md"
+keywords = ["channel", "asynchronous", "mpmc", "golang", "select"]
+license = "Unlicense/MIT"
 
 [dependencies]
 rand = "0.3"
