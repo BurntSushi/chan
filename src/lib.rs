@@ -15,31 +15,35 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rand::Rng;
 use uuid::Uuid;
 
+pub fn sync_channel<T>(size: usize) -> (SyncSender<T>, SyncReceiver<T>) {
+    let send = SyncChannel::new(size);
+    let recv = send.clone();
+    (SyncSender(send), SyncReceiver(recv))
+}
+
 pub trait Channel {
     type Item;
 
-    fn send(&self, val: Self::Item);
-    fn try_send(&self, val: Self::Item) -> Result<(), Self::Item>;
-    fn recv(&self) -> Option<Self::Item>;
-    fn try_recv(&self) -> Result<Option<Self::Item>, ()>;
-    fn close(&self);
     fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid;
     fn unsubscribe(&self, key: &Uuid);
     fn clone_chan(&self) -> Self where Self: Sized;
+}
 
+pub trait Sender: Channel {
+    fn send(&self, val: Self::Item);
+    fn try_send(&self, val: Self::Item) -> Result<(), Self::Item>;
+    fn close(&self);
+}
+
+pub trait Receiver: Channel {
+    fn recv(&self) -> Option<Self::Item>;
+    fn try_recv(&self) -> Result<Option<Self::Item>, ()>;
     fn iter(self) -> Iter<Self> where Self: Sized { Iter::new(self) }
 }
 
 impl<'a, T: Channel> Channel for &'a T {
     type Item = T::Item;
 
-    fn send(&self, val: Self::Item) { (*self).send(val); }
-    fn try_send(&self, val: Self::Item) -> Result<(), Self::Item> {
-        (*self).try_send(val)
-    }
-    fn recv(&self) -> Option<Self::Item> { (*self).recv() }
-    fn try_recv(&self) -> Result<Option<Self::Item>, ()> { (*self).try_recv() }
-    fn close(&self) { (*self).close() }
     fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid {
         (*self).subscribe(condvar)
     }
@@ -49,10 +53,27 @@ impl<'a, T: Channel> Channel for &'a T {
     }
 }
 
-#[derive(Debug)]
-pub struct SyncChannel<T>(Arc<SyncInner<T>>);
+impl<'a, T: Sender> Sender for &'a T {
+    fn send(&self, val: Self::Item) { (*self).send(val); }
+    fn try_send(&self, val: Self::Item) -> Result<(), Self::Item> {
+        (*self).try_send(val)
+    }
+    fn close(&self) { (*self).close() }
+}
 
-struct Notifier(Mutex<HashMap<Uuid, Arc<Condvar>>>);
+impl<'a, T: Receiver> Receiver for &'a T {
+    fn recv(&self) -> Option<Self::Item> { (*self).recv() }
+    fn try_recv(&self) -> Result<Option<Self::Item>, ()> { (*self).try_recv() }
+}
+
+#[derive(Clone, Debug)]
+pub struct SyncSender<T>(SyncChannel<T>);
+
+#[derive(Clone, Debug)]
+pub struct SyncReceiver<T>(SyncChannel<T>);
+
+#[derive(Debug)]
+struct SyncChannel<T>(Arc<SyncInner<T>>);
 
 #[derive(Debug)]
 enum SyncInner<T> {
@@ -121,36 +142,6 @@ impl<T> SyncChannel<T> {
     }
 }
 
-impl Notifier {
-    fn new() -> Notifier {
-        Notifier(Mutex::new(HashMap::new()))
-    }
-
-    fn notify(&self) {
-        let notify = self.0.lock().unwrap();
-        for condvar in notify.values() {
-            condvar.notify_all();
-        }
-    }
-
-    fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid {
-        let mut notify = self.0.lock().unwrap();
-        for _ in 0..10 {
-            let key = Uuid::new_v4();
-            if !notify.contains_key(&key) {
-                notify.insert(key.clone(), condvar);
-                return key;
-            }
-        }
-        panic!("could not generate channel subscription key")
-    }
-
-    fn unsubscribe(&self, key: &Uuid) {
-        let mut notify = self.0.lock().unwrap();
-        notify.remove(key);
-    }
-}
-
 impl<T> Clone for SyncChannel<T> {
     fn clone(&self) -> SyncChannel<T> {
         SyncChannel(self.0.clone())
@@ -159,41 +150,6 @@ impl<T> Clone for SyncChannel<T> {
 
 impl<T> Channel for SyncChannel<T> {
     type Item = T;
-
-    fn send(&self, val: T) {
-        match *self.0 {
-            SyncInner::Unbuffered(ref i) => i.send(val, false).ok().unwrap(),
-            SyncInner::Buffered(ref i) => i.send(val, false).ok().unwrap(),
-        }
-    }
-
-    fn try_send(&self, val: T) -> Result<(), T> {
-        match *self.0 {
-            SyncInner::Unbuffered(ref i) => i.send(val, true),
-            SyncInner::Buffered(ref i) => i.send(val, true),
-        }
-    }
-
-    fn recv(&self) -> Option<T> {
-        match *self.0 {
-            SyncInner::Unbuffered(ref i) => i.recv(false).unwrap(),
-            SyncInner::Buffered(ref i) => i.recv(false).unwrap(),
-        }
-    }
-
-    fn try_recv(&self) -> Result<Option<T>, ()> {
-        match *self.0 {
-            SyncInner::Unbuffered(ref i) => i.recv(true),
-            SyncInner::Buffered(ref i) => i.recv(true),
-        }
-    }
-
-    fn close(&self) {
-        match *self.0 {
-            SyncInner::Unbuffered(ref i) => i.close(),
-            SyncInner::Buffered(ref i) => i.close(),
-        }
-    }
 
     fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid {
         match *self.0 {
@@ -211,6 +167,73 @@ impl<T> Channel for SyncChannel<T> {
 
     fn clone_chan(&self) -> SyncChannel<T> {
         self.clone()
+    }
+}
+
+impl<T> Channel for SyncSender<T> {
+    type Item = T;
+
+    fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid {
+        self.0.subscribe(condvar)
+    }
+
+    fn unsubscribe(&self, key: &Uuid) { self.0.unsubscribe(key); }
+
+    fn clone_chan(&self) -> SyncSender<T> {
+        SyncSender(self.0.clone_chan())
+    }
+}
+
+impl<T> Channel for SyncReceiver<T> {
+    type Item = T;
+
+    fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid {
+        self.0.subscribe(condvar)
+    }
+
+    fn unsubscribe(&self, key: &Uuid) { self.0.unsubscribe(key); }
+
+    fn clone_chan(&self) -> SyncReceiver<T> {
+        SyncReceiver(self.0.clone_chan())
+    }
+}
+
+impl<T> Sender for SyncSender<T> {
+    fn send(&self, val: T) {
+        match *(self.0).0 {
+            SyncInner::Unbuffered(ref i) => i.send(val, false).ok().unwrap(),
+            SyncInner::Buffered(ref i) => i.send(val, false).ok().unwrap(),
+        }
+    }
+
+    fn try_send(&self, val: T) -> Result<(), T> {
+        match *(self.0).0 {
+            SyncInner::Unbuffered(ref i) => i.send(val, true),
+            SyncInner::Buffered(ref i) => i.send(val, true),
+        }
+    }
+
+    fn close(&self) {
+        match *(self.0).0 {
+            SyncInner::Unbuffered(ref i) => i.close(),
+            SyncInner::Buffered(ref i) => i.close(),
+        }
+    }
+}
+
+impl<T> Receiver for SyncReceiver<T> {
+    fn recv(&self) -> Option<T> {
+        match *(self.0).0 {
+            SyncInner::Unbuffered(ref i) => i.recv(false).unwrap(),
+            SyncInner::Buffered(ref i) => i.recv(false).unwrap(),
+        }
+    }
+
+    fn try_recv(&self) -> Result<Option<T>, ()> {
+        match *(self.0).0 {
+            SyncInner::Unbuffered(ref i) => i.recv(true),
+            SyncInner::Buffered(ref i) => i.recv(true),
+        }
     }
 }
 
@@ -286,6 +309,18 @@ impl<T> Ring<T> {
     }
 }
 
+impl<T: fmt::Debug> fmt::Debug for Buffered<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let ring = self.ring.lock().unwrap();
+        try!(writeln!(f, "Buffered {{"));
+        try!(writeln!(f, "    notify: {:?}", self.notify));
+        try!(writeln!(f, "    cap: {:?}", self.cap));
+        try!(writeln!(f, "    ring: {:?}", *ring));
+        try!(writeln!(f, "}}"));
+        Ok(())
+    }
+}
+
 impl<T> Unbuffered<T> {
     fn send(&self, send_val: T, try: bool) -> Result<(), T> {
         {
@@ -356,27 +391,6 @@ impl<T> Unbuffered<T> {
     }
 }
 
-
-pub struct Iter<C> {
-    chan: C,
-}
-
-impl<C: Channel> Iter<C> {
-    pub fn new(c: C) -> Iter<C> { Iter { chan: c } }
-}
-
-impl<C: Channel> Iterator for Iter<C> {
-    type Item = C::Item;
-    fn next(&mut self) -> Option<C::Item> { self.chan.recv() }
-}
-
-impl fmt::Debug for Notifier {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let notify = self.0.lock().unwrap();
-        writeln!(f, "Notifier({:?})", notify.keys().collect::<Vec<_>>())
-    }
-}
-
 impl<T: fmt::Debug> fmt::Debug for Unbuffered<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let val = self.val.lock().unwrap();
@@ -385,18 +399,6 @@ impl<T: fmt::Debug> fmt::Debug for Unbuffered<T> {
         try!(writeln!(f, "    nwaiting: {:?}",
                       self.nwaiting.load(Ordering::SeqCst)));
         try!(writeln!(f, "    val: {:?}", *val));
-        try!(writeln!(f, "}}"));
-        Ok(())
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for Buffered<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let ring = self.ring.lock().unwrap();
-        try!(writeln!(f, "Buffered {{"));
-        try!(writeln!(f, "    notify: {:?}", self.notify));
-        try!(writeln!(f, "    cap: {:?}", self.cap));
-        try!(writeln!(f, "    ring: {:?}", *ring));
         try!(writeln!(f, "}}"));
         Ok(())
     }
@@ -449,6 +451,20 @@ impl<T> AsyncChannel<T> {
 impl<T> Channel for AsyncChannel<T> {
     type Item = T;
 
+    fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid {
+        self.0.notify.subscribe(condvar)
+    }
+
+    fn unsubscribe(&self, key: &Uuid) {
+        self.0.notify.unsubscribe(key)
+    }
+
+    fn clone_chan(&self) -> AsyncChannel<T> {
+        self.clone()
+    }
+}
+
+impl<T> Sender for AsyncChannel<T> {
     fn send(&self, val: T) {
         self.try_send(val).ok().unwrap();
     }
@@ -461,31 +477,21 @@ impl<T> Channel for AsyncChannel<T> {
         Ok(())
     }
 
-    fn recv(&self) -> Option<T> {
-        self._recv(false).unwrap()
-    }
-
-    fn try_recv(&self) -> Result<Option<T>, ()> {
-        self._recv(true)
-    }
-
     fn close(&self) {
         let mut queue = self.0.queue.lock().unwrap();
         queue.closed = true;
         self.0.cond.notify_all();
         self.0.notify.notify();
     }
+}
 
-    fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid {
-        self.0.notify.subscribe(condvar)
+impl<T> Receiver for AsyncChannel<T> {
+    fn recv(&self) -> Option<T> {
+        self._recv(false).unwrap()
     }
 
-    fn unsubscribe(&self, key: &Uuid) {
-        self.0.notify.unsubscribe(key)
-    }
-
-    fn clone_chan(&self) -> AsyncChannel<T> {
-        self.clone()
+    fn try_recv(&self) -> Result<Option<T>, ()> {
+        self._recv(true)
     }
 }
 
@@ -505,6 +511,19 @@ impl<T: fmt::Debug> fmt::Debug for AsyncInner<T> {
         try!(writeln!(f, "}}"));
         Ok(())
     }
+}
+
+pub struct Iter<C> {
+    chan: C,
+}
+
+impl<C: Receiver> Iter<C> {
+    pub fn new(c: C) -> Iter<C> { Iter { chan: c } }
+}
+
+impl<C: Receiver> Iterator for Iter<C> {
+    type Item = C::Item;
+    fn next(&mut self) -> Option<C::Item> { self.chan.recv() }
 }
 
 #[derive(Clone)]
@@ -549,10 +568,49 @@ impl fmt::Debug for WaitGroup {
     }
 }
 
+struct Notifier(Mutex<HashMap<Uuid, Arc<Condvar>>>);
+
+impl Notifier {
+    fn new() -> Notifier {
+        Notifier(Mutex::new(HashMap::new()))
+    }
+
+    fn notify(&self) {
+        let notify = self.0.lock().unwrap();
+        for condvar in notify.values() {
+            condvar.notify_all();
+        }
+    }
+
+    fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid {
+        let mut notify = self.0.lock().unwrap();
+        for _ in 0..10 {
+            let key = Uuid::new_v4();
+            if !notify.contains_key(&key) {
+                notify.insert(key.clone(), condvar);
+                return key;
+            }
+        }
+        panic!("could not generate channel subscription key")
+    }
+
+    fn unsubscribe(&self, key: &Uuid) {
+        let mut notify = self.0.lock().unwrap();
+        notify.remove(key);
+    }
+}
+
+impl fmt::Debug for Notifier {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let notify = self.0.lock().unwrap();
+        writeln!(f, "Notifier({:?})", notify.keys().collect::<Vec<_>>())
+    }
+}
+
 pub struct Choose<'a, T> {
     cond: Arc<Condvar>,
     cond_mutex: Mutex<()>,
-    chans: Vec<(Uuid, Box<Channel<Item=T> + 'a>)>,
+    chans: Vec<(Uuid, Box<Receiver<Item=T> + 'a>)>,
 }
 
 impl<'a, T> Choose<'a, T> {
@@ -565,7 +623,7 @@ impl<'a, T> Choose<'a, T> {
     }
 
     pub fn recv<C>(mut self, chan: C) -> Choose<'a, T>
-            where C: Channel<Item=T> + 'a {
+            where C: Receiver<Item=T> + 'a {
         let key = chan.subscribe(self.cond.clone());
         self.chans.push((key, Box::new(chan)));
         self
@@ -657,7 +715,7 @@ impl<'a> Select<'a> {
         chan: C,
         val: T,
         mut run: F,
-    ) -> Select<'a> where C: Channel<Item=T> + 'c,
+    ) -> Select<'a> where C: Sender<Item=T> + 'c,
                           T: 'b,
                           F: FnMut() + 'a {
         let key = chan.subscribe(self.cond.clone());
@@ -679,7 +737,7 @@ impl<'a> Select<'a> {
         mut self,
         chan: C,
         mut run: F,
-    ) -> Select<'a> where C: Channel<Item=T> + 'b,
+    ) -> Select<'a> where C: Receiver<Item=T> + 'b,
                           F: FnMut(Option<T>) + 'a {
         let key = chan.subscribe(self.cond.clone());
         let chan2 = chan.clone_chan();
@@ -708,36 +766,40 @@ impl<'a> ops::Drop for Select<'a> {
 mod tests {
     use std::thread;
 
-    use super::{Channel, Choose, Select, AsyncChannel, SyncChannel, WaitGroup};
+    use super::{
+        Sender, Receiver,
+        Choose, Select, AsyncChannel, WaitGroup,
+        sync_channel,
+    };
 
     #[test]
     fn simple() {
-        let chan = SyncChannel::new(1);
-        chan.send(5);
-        assert_eq!(chan.recv(), Some(5));
+        let (send, recv) = sync_channel(1);
+        send.send(5);
+        assert_eq!(recv.recv(), Some(5));
     }
 
     #[test]
     #[should_panic]
     fn no_send_on_close() {
-        let chan = SyncChannel::new(1);
-        chan.close();
-        chan.send(5);
+        let (send, _) = sync_channel(1);
+        send.close();
+        send.send(5);
     }
 
     #[test]
     #[should_panic]
     fn no_send_on_close_unbuffered() {
-        let chan = SyncChannel::new(0);
-        chan.close();
-        chan.send(5);
+        let (send, _) = sync_channel(0);
+        send.close();
+        send.send(5);
     }
 
     #[test]
     fn simple_unbuffered() {
-        let chan = SyncChannel::new(0);
-        { let chan = chan.clone(); thread::spawn(move || chan.send(5)); }
-        assert_eq!(chan.recv(), Some(5));
+        let (send, recv) = sync_channel(0);
+        thread::spawn(move || send.send(5));
+        assert_eq!(recv.recv(), Some(5));
     }
 
     #[test]
@@ -749,29 +811,27 @@ mod tests {
 
     #[test]
     fn simple_iter() {
-        let chan = SyncChannel::new(1);
-        let chan2 = chan.clone();
+        let (send, recv) = sync_channel(1);
         thread::spawn(move || {
             for i in 0..100 {
-                chan2.send(i);
+                send.send(i);
             }
-            chan2.close();
+            send.close();
         });
-        let recvd: Vec<i32> = chan.iter().collect();
+        let recvd: Vec<i32> = recv.iter().collect();
         assert_eq!(recvd, (0..100).collect::<Vec<i32>>());
     }
 
     #[test]
     fn simple_iter_unbuffered() {
-        let chan = SyncChannel::new(0);
-        let chan2 = chan.clone();
+        let (send, recv) = sync_channel(1);
         thread::spawn(move || {
             for i in 0..100 {
-                chan2.send(i);
+                send.send(i);
             }
-            chan2.close();
+            send.close();
         });
-        let recvd: Vec<i32> = chan.iter().collect();
+        let recvd: Vec<i32> = recv.iter().collect();
         assert_eq!(recvd, (0..100).collect::<Vec<i32>>());
     }
 
@@ -791,16 +851,16 @@ mod tests {
 
     #[test]
     fn simple_try() {
-        let chan = SyncChannel::new(1);
-        chan.try_send(5).is_err();
-        chan.try_recv().is_err();
+        let (send, recv) = sync_channel(1);
+        send.try_send(5).is_err();
+        recv.try_recv().is_err();
     }
 
     #[test]
     fn simple_try_unbuffered() {
-        let chan = SyncChannel::new(0);
-        chan.try_send(5).is_err();
-        chan.try_recv().is_err();
+        let (send, recv) = sync_channel(0);
+        send.try_send(5).is_err();
+        recv.try_recv().is_err();
     }
 
     #[test]
@@ -812,40 +872,34 @@ mod tests {
 
     #[test]
     fn select() {
-        let ticka = SyncChannel::new(1);
-        let tickb = SyncChannel::new(1);
-        let tickc = SyncChannel::new(1);
-        let recv = SyncChannel::new(0);
-        {
-            let ticka = ticka.clone();
-            let tickb = tickb.clone();
-            let tickc = tickc.clone();
-            let recv = recv.clone();
-            thread::spawn(move || {
-                loop {
-                    ticka.send("ticka");
-                    thread::sleep_ms(100);
-                    recv.recv();
-                }
-            });
-            thread::spawn(move || {
-                loop {
-                    tickb.send("tickb");
-                    thread::sleep_ms(50);
-                }
-            });
-            thread::spawn(move || {
-                thread::sleep_ms(1000);
-                tickc.send(());
-            });
-        }
+        let (sticka, rticka) = sync_channel(1);
+        let (stickb, rtickb) = sync_channel(1);
+        let (stickc, rtickc) = sync_channel(1);
+        let (send, recv) = sync_channel(0);
+        thread::spawn(move || {
+            loop {
+                sticka.send("ticka");
+                thread::sleep_ms(100);
+                recv.recv();
+            }
+        });
+        thread::spawn(move || {
+            loop {
+                stickb.send("tickb");
+                thread::sleep_ms(50);
+            }
+        });
+        thread::spawn(move || {
+            thread::sleep_ms(1000);
+            stickc.send(());
+        });
         loop {
             let mut stop = false;
             Select::new()
-            .recv(&ticka, |val| println!("{:?}", val))
-            .recv(&tickb, |val| println!("{:?}", val))
-            .recv(&tickc, |val| { stop = true; println!("{:?}", val) })
-            .send(&recv, (), || println!("SENT!"))
+            .recv(&rticka, |val| println!("{:?}", val))
+            .recv(&rtickb, |val| println!("{:?}", val))
+            .recv(&rtickc, |val| { stop = true; println!("{:?}", val) })
+            .send(&send, (), || println!("SENT!"))
             .select();
             if stop {
                 break;
@@ -858,25 +912,22 @@ mod tests {
     fn choose() {
         #[derive(Debug)]
         enum Message { Foo, Bar, Fubar }
-        let s1 = SyncChannel::new(1);
-        let s2 = SyncChannel::new(1);
-        let s3 = SyncChannel::new(1);
-        {
-            let (s1, s2, s3) = (s1.clone(), s2.clone(), s3.clone());
-            thread::spawn(move || loop {
-                thread::sleep_ms(50);
-                s1.send(Message::Foo);
-            });
-            thread::spawn(move || loop {
-                thread::sleep_ms(70);
-                s2.send(Message::Bar);
-            });
-            thread::spawn(move || loop {
-                thread::sleep_ms(500);
-                s3.send(Message::Fubar);
-            });
-        }
-        let mut chooser = Choose::new().recv(s1).recv(s2).recv(s3);
+        let (s1, r1) = sync_channel(1);
+        let (s2, r2) = sync_channel(1);
+        let (s3, r3) = sync_channel(1);
+        thread::spawn(move || loop {
+            thread::sleep_ms(50);
+            s1.send(Message::Foo);
+        });
+        thread::spawn(move || loop {
+            thread::sleep_ms(70);
+            s2.send(Message::Bar);
+        });
+        thread::spawn(move || loop {
+            thread::sleep_ms(500);
+            s3.send(Message::Fubar);
+        });
+        let mut chooser = Choose::new().recv(r1).recv(r2).recv(r3);
         loop {
             match chooser.choose().unwrap() {
                 Message::Foo => println!("foo"),
@@ -889,17 +940,17 @@ mod tests {
 
     #[test]
     fn mpmc() {
-        let chan = SyncChannel::new(1);
+        let (send, recv) = sync_channel(1);
         let mut done = vec![];
         for i in 0..4 {
-            let chan = chan.clone();
-            let cdone = SyncChannel::new(0);
-            done.push(cdone.clone());
+            let send = send.clone();
+            let (sdone, rdone) = sync_channel(0);
+            done.push(rdone);
             thread::spawn(move || {
                 for work in vec!['a', 'b', 'c'] {
-                    chan.send((i, work));
+                    send.send((i, work));
                 }
-                cdone.send(());
+                sdone.send(());
             });
         }
         {
@@ -908,18 +959,18 @@ mod tests {
             //
             // See below for similar example with wait groups that makes this
             // simpler.
-            let chan = chan.clone();
+            let send = send.clone();
             thread::spawn(move || {
-                for cdone in done {
-                    cdone.recv();
+                for rdone in done {
+                    rdone.recv();
                 }
-                chan.close();
+                send.close();
             });
         }
         for i in 0..4 {
-            let chan = chan.clone();
+            let recv = recv.clone();
             thread::spawn(move || {
-                for (sent_from, work) in chan.iter() {
+                for (sent_from, work) in recv.iter() {
                     println!("sent from {} to {}, work: {}",
                              sent_from, i, work);
                 }
@@ -931,15 +982,15 @@ mod tests {
 
     #[test]
     fn mpmc_wait_group() {
-        let chan = SyncChannel::new(1);
+        let (send, recv) = sync_channel(1);
         let wg = WaitGroup::new();
         for i in 0..4 {
             wg.add(1);
             let wg = wg.clone();
-            let chan = chan.clone();
+            let send = send.clone();
             thread::spawn(move || {
                 for work in vec!['a', 'b', 'c'] {
-                    chan.send((i, work));
+                    send.send((i, work));
                 }
                 wg.done();
             });
@@ -948,9 +999,9 @@ mod tests {
         for i in 0..4 {
             wg_done.add(1);
             let wg_done = wg_done.clone();
-            let chan = chan.clone();
+            let recv = recv.clone();
             thread::spawn(move || {
-                for (sent_from, work) in chan.iter() {
+                for (sent_from, work) in recv.iter() {
                     println!("sent from {} to {}, work: {}",
                              sent_from, i, work);
                 }
@@ -959,7 +1010,7 @@ mod tests {
             });
         }
         wg.wait();
-        chan.close();
+        send.close();
         wg_done.wait();
         println!("done!");
     }
