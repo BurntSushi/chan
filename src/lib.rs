@@ -733,6 +733,19 @@ impl<'a, T> Drop for Choose<'a, T> {
     }
 }
 
+// BREADCRUMBS: Most of the problems with `Select` stem from the fact that
+// the `send` method takes ownership of a value. If that `send` is activated,
+// then that value is lost and the entire `Select` must be re-constructed
+// (which is expensive).
+//
+// A possible solution to this is to demand that the sent value be cloneable.
+// `Select` can take ownership, but clone the value before sending it.
+// This doesn't work so hot if cloning is expensive, but we can make the
+// argument that the caller needs to be responsible for cheap cloning. In
+// particular, they should probably use `Arc`. But we should not demand
+// `Arc` because it would be silly to shoehorn its use with `Copy` types
+// (or other types that are cheap to clone).
+
 pub struct Select<'a> {
     cond: Arc<Condvar>,
     cond_mutex: Mutex<()>,
