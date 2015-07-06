@@ -8,7 +8,7 @@ extern crate uuid;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::ops;
+use std::ops::Drop;
 use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -18,7 +18,7 @@ use uuid::Uuid;
 pub fn sync_channel<T>(size: usize) -> (SyncSender<T>, SyncReceiver<T>) {
     let send = SyncChannel::new(size);
     let recv = send.clone();
-    (SyncSender(send), SyncReceiver(recv))
+    (send.into_sender(), recv.into_receiver())
 }
 
 pub trait Channel {
@@ -26,7 +26,6 @@ pub trait Channel {
 
     fn subscribe(&self, condvar: Arc<Condvar>) -> Uuid;
     fn unsubscribe(&self, key: &Uuid);
-    fn clone_chan(&self) -> Self where Self: Sized;
 }
 
 pub trait Sender: Channel {
@@ -48,9 +47,6 @@ impl<'a, T: Channel> Channel for &'a T {
         (*self).subscribe(condvar)
     }
     fn unsubscribe(&self, key: &Uuid) { (*self).unsubscribe(key) }
-    fn clone_chan(&self) -> Self where Self: Sized {
-        self
-    }
 }
 
 impl<'a, T: Sender> Sender for &'a T {
@@ -66,10 +62,10 @@ impl<'a, T: Receiver> Receiver for &'a T {
     fn try_recv(&self) -> Result<Option<Self::Item>, ()> { (*self).try_recv() }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SyncSender<T>(SyncChannel<T>);
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SyncReceiver<T>(SyncChannel<T>);
 
 #[derive(Debug)]
@@ -83,6 +79,7 @@ enum SyncInner<T> {
 
 struct Unbuffered<T> {
     notify: Notifier,
+    track: Tracker,
     nwaiting: AtomicUsize,
     cond: Condvar,
     sender: Mutex<()>,
@@ -97,6 +94,7 @@ struct UnbufferedValue<T> {
 
 struct Buffered<T> {
     notify: Notifier,
+    track: Tracker,
     cap: usize,
     cond: Condvar,
     ring: Mutex<Ring<T>>,
@@ -111,10 +109,11 @@ struct Ring<T> {
 }
 
 impl<T> SyncChannel<T> {
-    pub fn new(size: usize) -> SyncChannel<T> {
+    fn new(size: usize) -> SyncChannel<T> {
         let inner = if size == 0 {
             SyncInner::Unbuffered(Unbuffered {
                 notify: Notifier::new(),
+                track: Tracker::new(),
                 nwaiting: AtomicUsize::new(0),
                 cond: Condvar::new(),
                 sender: Mutex::new(()),
@@ -128,6 +127,7 @@ impl<T> SyncChannel<T> {
             for _ in 0..size { queue.push(None); }
             SyncInner::Buffered(Buffered {
                 notify: Notifier::new(),
+                track: Tracker::new(),
                 cap: size,
                 cond: Condvar::new(),
                 ring: Mutex::new(Ring {
@@ -140,11 +140,52 @@ impl<T> SyncChannel<T> {
         };
         SyncChannel(Arc::new(inner))
     }
+
+    fn track(&self) -> &Tracker {
+        match *self.0 {
+            SyncInner::Unbuffered(ref i) => &i.track,
+            SyncInner::Buffered(ref i) => &i.track,
+        }
+    }
+
+    fn into_sender(self) -> SyncSender<T> {
+        self.track().add_sender();
+        SyncSender(self)
+    }
+
+    fn into_receiver(self) -> SyncReceiver<T> {
+        self.track().add_receiver();
+        SyncReceiver(self)
+    }
 }
 
 impl<T> Clone for SyncChannel<T> {
     fn clone(&self) -> SyncChannel<T> {
         SyncChannel(self.0.clone())
+    }
+}
+
+impl<T> Clone for SyncSender<T> {
+    fn clone(&self) -> SyncSender<T> {
+        self.0.clone().into_sender()
+    }
+}
+
+impl<T> Clone for SyncReceiver<T> {
+    fn clone(&self) -> SyncReceiver<T> {
+        self.0.clone().into_receiver()
+    }
+}
+
+impl<T> Drop for SyncSender<T> {
+    fn drop(&mut self) {
+        self.0.track().remove_sender(|| self.close());
+    }
+}
+
+impl<T> Drop for SyncReceiver<T> {
+    fn drop(&mut self) {
+        self.0.track().remove_receiver(||());
     }
 }
 
@@ -164,10 +205,6 @@ impl<T> Channel for SyncChannel<T> {
             SyncInner::Buffered(ref i) => i.notify.unsubscribe(key),
         }
     }
-
-    fn clone_chan(&self) -> SyncChannel<T> {
-        self.clone()
-    }
 }
 
 impl<T> Channel for SyncSender<T> {
@@ -178,10 +215,6 @@ impl<T> Channel for SyncSender<T> {
     }
 
     fn unsubscribe(&self, key: &Uuid) { self.0.unsubscribe(key); }
-
-    fn clone_chan(&self) -> SyncSender<T> {
-        SyncSender(self.0.clone_chan())
-    }
 }
 
 impl<T> Channel for SyncReceiver<T> {
@@ -192,10 +225,6 @@ impl<T> Channel for SyncReceiver<T> {
     }
 
     fn unsubscribe(&self, key: &Uuid) { self.0.unsubscribe(key); }
-
-    fn clone_chan(&self) -> SyncReceiver<T> {
-        SyncReceiver(self.0.clone_chan())
-    }
 }
 
 impl<T> Sender for SyncSender<T> {
@@ -283,7 +312,7 @@ impl<T> Buffered<T> {
     }
 
     fn close(&self) {
-        let mut ring = self.ring.lock().unwrap();
+        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         ring.closed = true;
         self.cond.notify_all();
         self.notify.notify();
@@ -382,7 +411,14 @@ impl<T> Unbuffered<T> {
     }
 
     fn close(&self) {
-        let mut val = self.val.lock().unwrap();
+        // It's unclear to me what this code should do if the mutex is
+        // poisoned. This code path happens when the program panics and the
+        // destructor for the last sender is run. It seems like we should mush
+        // on and let the program continue as normally as we can. That means
+        // notifying other threads that this channel has been closed.
+        // But of course, this also means that notification must also handle
+        // poisoned mutexes. Blech.
+        let mut val = self.val.lock().unwrap_or_else(|e| e.into_inner());
         val.closed = true;
         // If there are any blocked receivers, this will wake them up and
         // force them to return.
@@ -457,10 +493,6 @@ impl<T> Channel for AsyncChannel<T> {
 
     fn unsubscribe(&self, key: &Uuid) {
         self.0.notify.unsubscribe(key)
-    }
-
-    fn clone_chan(&self) -> AsyncChannel<T> {
-        self.clone()
     }
 }
 
@@ -568,6 +600,47 @@ impl fmt::Debug for WaitGroup {
     }
 }
 
+struct Tracker(Mutex<TrackerCounts>);
+
+struct TrackerCounts {
+    senders: usize,
+    receivers: usize,
+}
+
+impl Tracker {
+    fn new() -> Tracker {
+        Tracker(Mutex::new(TrackerCounts { senders: 0, receivers: 0 }))
+    }
+
+    fn add_sender(&self) {
+        let mut counts = self.0.lock().unwrap();
+        counts.senders += 1;
+    }
+
+    fn add_receiver(&self) {
+        let mut counts = self.0.lock().unwrap();
+        counts.receivers += 1;
+    }
+
+    fn remove_sender<F: FnMut()>(&self, mut at_zero: F) {
+        let mut counts = self.0.lock().unwrap();
+        assert!(counts.senders > 0);
+        counts.senders -= 1;
+        if counts.senders == 0 {
+            at_zero();
+        }
+    }
+
+    fn remove_receiver<F: FnMut()>(&self, mut at_zero: F) {
+        let mut counts = self.0.lock().unwrap();
+        assert!(counts.receivers > 0);
+        counts.receivers -= 1;
+        if counts.receivers == 0 {
+            at_zero();
+        }
+    }
+}
+
 struct Notifier(Mutex<HashMap<Uuid, Arc<Condvar>>>);
 
 impl Notifier {
@@ -576,7 +649,7 @@ impl Notifier {
     }
 
     fn notify(&self) {
-        let notify = self.0.lock().unwrap();
+        let notify = self.0.lock().unwrap_or_else(|e| e.into_inner());
         for condvar in notify.values() {
             condvar.notify_all();
         }
@@ -652,7 +725,7 @@ impl<'a, T> Choose<'a, T> {
     }
 }
 
-impl<'a, T> ops::Drop for Choose<'a, T> {
+impl<'a, T> Drop for Choose<'a, T> {
     fn drop(&mut self) {
         for &(ref key, ref chan) in &self.chans {
             chan.unsubscribe(key);
@@ -715,12 +788,12 @@ impl<'a> Select<'a> {
         chan: C,
         val: T,
         mut run: F,
-    ) -> Select<'a> where C: Sender<Item=T> + 'c,
+    ) -> Select<'a> where C: Sender<Item=T> + Clone + 'c,
                           T: 'b,
                           F: FnMut() + 'a {
         let key = chan.subscribe(self.cond.clone());
         let mut val = Some(val);
-        let chan2 = chan.clone_chan();
+        let chan2 = chan.clone();
         self.choices.push(Choice {
             run: Box::new(move || {
                 match chan.try_send(val.take().unwrap()) {
@@ -737,10 +810,10 @@ impl<'a> Select<'a> {
         mut self,
         chan: C,
         mut run: F,
-    ) -> Select<'a> where C: Receiver<Item=T> + 'b,
+    ) -> Select<'a> where C: Receiver<Item=T> + Clone + 'b,
                           F: FnMut(Option<T>) + 'a {
         let key = chan.subscribe(self.cond.clone());
-        let chan2 = chan.clone_chan();
+        let chan2 = chan.clone();
         self.choices.push(Choice {
             run: Box::new(move || {
                 match chan.try_recv() {
@@ -754,7 +827,7 @@ impl<'a> Select<'a> {
     }
 }
 
-impl<'a> ops::Drop for Select<'a> {
+impl<'a> Drop for Select<'a> {
     fn drop(&mut self) {
         for choice in &mut self.choices {
             (choice.unsubscribe)();
@@ -769,7 +842,7 @@ mod tests {
     use super::{
         Sender, Receiver,
         Choose, Select, AsyncChannel, WaitGroup,
-        sync_channel,
+        SyncSender, sync_channel,
     };
 
     #[test]
@@ -783,16 +856,25 @@ mod tests {
     #[should_panic]
     fn no_send_on_close() {
         let (send, _) = sync_channel(1);
-        send.close();
-        send.send(5);
+        // cheat and get a sender without increasing sender count.
+        // (this is only possible with private API!)
+        let cheat_send = SyncSender(send.0.clone());
+        drop(send);
+        // Ok, increase sender count now, after the channel has already
+        // been closed.
+        ::std::mem::forget(cheat_send.clone());
+        cheat_send.send(5);
     }
 
     #[test]
     #[should_panic]
     fn no_send_on_close_unbuffered() {
+        // See comments in test `no_send_on_close` for explanation.
         let (send, _) = sync_channel(0);
-        send.close();
-        send.send(5);
+        let cheat_send = SyncSender(send.0.clone());
+        drop(send);
+        ::std::mem::forget(cheat_send.clone());
+        cheat_send.send(5);
     }
 
     #[test]
@@ -816,7 +898,6 @@ mod tests {
             for i in 0..100 {
                 send.send(i);
             }
-            send.close();
         });
         let recvd: Vec<i32> = recv.iter().collect();
         assert_eq!(recvd, (0..100).collect::<Vec<i32>>());
@@ -829,7 +910,6 @@ mod tests {
             for i in 0..100 {
                 send.send(i);
             }
-            send.close();
         });
         let recvd: Vec<i32> = recv.iter().collect();
         assert_eq!(recvd, (0..100).collect::<Vec<i32>>());
@@ -941,58 +1021,12 @@ mod tests {
     #[test]
     fn mpmc() {
         let (send, recv) = sync_channel(1);
-        let mut done = vec![];
         for i in 0..4 {
-            let send = send.clone();
-            let (sdone, rdone) = sync_channel(0);
-            done.push(rdone);
-            thread::spawn(move || {
-                for work in vec!['a', 'b', 'c'] {
-                    send.send((i, work));
-                }
-                sdone.send(());
-            });
-        }
-        {
-            // Wait for all of the producers to finish before closing
-            // the channel.
-            //
-            // See below for similar example with wait groups that makes this
-            // simpler.
-            let send = send.clone();
-            thread::spawn(move || {
-                for rdone in done {
-                    rdone.recv();
-                }
-                send.close();
-            });
-        }
-        for i in 0..4 {
-            let recv = recv.clone();
-            thread::spawn(move || {
-                for (sent_from, work) in recv.iter() {
-                    println!("sent from {} to {}, work: {}",
-                             sent_from, i, work);
-                }
-                println!("worker {} done!", i);
-            });
-        }
-        thread::sleep_ms(1000);
-    }
-
-    #[test]
-    fn mpmc_wait_group() {
-        let (send, recv) = sync_channel(1);
-        let wg = WaitGroup::new();
-        for i in 0..4 {
-            wg.add(1);
-            let wg = wg.clone();
             let send = send.clone();
             thread::spawn(move || {
                 for work in vec!['a', 'b', 'c'] {
                     send.send((i, work));
                 }
-                wg.done();
             });
         }
         let wg_done = WaitGroup::new();
@@ -1009,8 +1043,7 @@ mod tests {
                 wg_done.done();
             });
         }
-        wg.wait();
-        send.close();
+        drop(send);
         wg_done.wait();
         println!("done!");
     }
