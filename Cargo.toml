@@ -1,6 +1,6 @@
 [package]
 name = "chan"
-version = "0.1.4"  #:version
+version = "0.1.5"  #:version
 authors = ["Andrew Gallant <jamslam@gmail.com>"]
 description = "Multi-producer, multi-consumer channels with select."
 documentation = "http://burntsushi.net/rustdoc/chan/"
