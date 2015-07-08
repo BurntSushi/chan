@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use rand::{self, Rng};
 
-use {Receiver, Sender};
+use {Receiver, Sender, ChannelId};
 
 pub struct Choose<'a, T> {
     cond: Arc<Condvar>,
@@ -61,39 +61,21 @@ impl<'a, T> Drop for Choose<'a, T> {
     }
 }
 
-// BREADCRUMBS: Most of the problems with `Select` stem from the fact that
-// the `send` method takes ownership of a value. If that `send` is activated,
-// then that value is lost and the entire `Select` must be re-constructed
-// (which is expensive).
-//
-// A possible solution to this is to demand that the sent value be cloneable.
-// `Select` can take ownership, but clone the value before sending it.
-// This doesn't work so hot if cloning is expensive, but we can make the
-// argument that the caller needs to be responsible for cheap cloning. In
-// particular, they should probably use `Arc`. But we should not demand
-// `Arc` because it would be silly to shoehorn its use with `Copy` types
-// (or other types that are cheap to clone).
-
-pub struct Select {
+pub struct Select<'c> {
     cond: Arc<Condvar>,
     cond_mutex: Mutex<()>,
-    choices: HashMap<ChoiceKey, Choice>,
+    choices: HashMap<ChannelId, Choice<'c>>,
+    ids: Option<Vec<ChannelId>>,
 }
 
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub enum ChoiceKey {
-    Sender(u64),
-    Receiver(u64),
+struct Choice<'c> {
+    subscribe: MaybeSubscribed<'c>,
+    unsubscribe: Box<Fn(u64) + 'c>,
+    try: Box<FnMut() -> bool + 'c>,
 }
 
-struct Choice {
-    subscribe: MaybeSubscribed,
-    unsubscribe: Box<Fn(u64) + 'static>,
-    try: Box<FnMut() -> bool + 'static>,
-}
-
-enum MaybeSubscribed {
-    No(Box<Fn() -> u64 + 'static>),
+enum MaybeSubscribed<'c> {
+    No(Box<Fn() -> u64 + 'c>),
     Yes(u64),
 }
 
@@ -109,14 +91,14 @@ pub struct SelectRecvHandle<R, T> {
 }
 
 impl<S: Sender> SelectSendHandle<S> {
-    pub fn id(&self) -> ChoiceKey {
-        ChoiceKey::Sender(self.chan.id())
+    pub fn id(&self) -> ChannelId {
+        self.chan.id()
     }
 }
 
 impl<R: Receiver<Item=T>, T> SelectRecvHandle<R, T> {
-    pub fn id(&self) -> ChoiceKey {
-        ChoiceKey::Receiver(self.chan.id())
+    pub fn id(&self) -> ChannelId {
+        self.chan.id()
     }
 
     pub fn into_value(self) -> Option<T> {
@@ -125,12 +107,13 @@ impl<R: Receiver<Item=T>, T> SelectRecvHandle<R, T> {
     }
 }
 
-impl Select {
-    pub fn new() -> Select {
+impl<'c> Select<'c> {
+    pub fn new() -> Select<'c> {
         Select {
             cond: Arc::new(Condvar::new()),
             cond_mutex: Mutex::new(()),
             choices: HashMap::new(),
+            ids: None,
         }
     }
 
@@ -139,14 +122,23 @@ impl Select {
             || self.choices.values().next().unwrap().is_subscribed()
     }
 
-    pub fn select(&mut self, default: bool) -> Option<ChoiceKey> {
+    pub fn select(&mut self) -> ChannelId {
+        self.maybe_try_select(false).unwrap()
+    }
+
+    pub fn try_select(&mut self) -> Option<ChannelId> {
+        self.maybe_try_select(true)
+    }
+
+    fn maybe_try_select(&mut self, try: bool) -> Option<ChannelId> {
+        self.ids = Some(self.choices.keys().cloned().collect());
         let mut first = true;
         loop {
             if let Some(key) = self.try() {
                 return Some(key);
             }
             if first {
-                if default {
+                if try {
                     return None;
                 }
                 // At this point, we've tried to pick one of the
@@ -165,22 +157,23 @@ impl Select {
         }
     }
 
-    fn try(&mut self) -> Option<ChoiceKey> {
-        for (&key, choice) in &mut self.choices {
-            if (choice.try)() {
-                return Some(key);
+    fn try(&mut self) -> Option<ChannelId> {
+        let mut ids = self.ids.as_mut().unwrap();
+        rand::thread_rng().shuffle(ids);
+        for key in ids {
+            if (self.choices.get_mut(key).unwrap().try)() {
+                return Some(*key);
             }
         }
         None
     }
 
-    pub fn send<S, T>(
+    pub fn send<'s: 'c, S, T>(
         &mut self,
         chan: S,
         val: T,
     ) -> SelectSendHandle<S>
-    where S: Sender<Item=T> + Clone + 'static, T: 'static {
-        let key = ChoiceKey::Sender(chan.id());
+    where S: Sender<Item=T> + Clone + 's, T: 'static {
         let mut val = Some(val);
         let chan2 = chan.clone();
         let boxed_try = Box::new(move || {
@@ -193,11 +186,13 @@ impl Select {
                 Err(val2) => { val = Some(val2); false }
             }
         });
-        match self.choices.entry(key) {
+        match self.choices.entry(chan.id()) {
             Entry::Occupied(mut choice) => {
                 choice.get_mut().try = boxed_try;
             }
             Entry::Vacant(spot) => {
+                assert!(self.ids.is_none(),
+                        "cannot add new channels after initial select");
                 let (chan2, chan3) = (chan.clone(), chan.clone());
                 let condvar = self.cond.clone();
                 spot.insert(Choice {
@@ -212,12 +207,11 @@ impl Select {
         SelectSendHandle { chan: chan }
     }
 
-    pub fn recv<R, T>(
+    pub fn recv<'r: 'c, R, T>(
         &mut self,
         chan: R,
     ) -> SelectRecvHandle<R, T>
-    where R: Receiver<Item=T> + Clone + 'static, T: 'static {
-        let key = ChoiceKey::Receiver(chan.id());
+    where R: Receiver<Item=T> + Clone + 'r, T: 'static {
         let recv_val = Rc::new(RefCell::new(None));
         let recv_val2 = recv_val.clone();
         let chan2 = chan.clone();
@@ -227,11 +221,13 @@ impl Select {
                 Err(()) => false,
             }
         });
-        match self.choices.entry(key) {
+        match self.choices.entry(chan.id()) {
             Entry::Occupied(mut choice) => {
                 choice.get_mut().try = boxed_try;
             }
             Entry::Vacant(spot) => {
+                assert!(self.ids.is_none(),
+                        "cannot add new channels after initial select");
                 let (chan2, chan3) = (chan.clone(), chan.clone());
                 let condvar = self.cond.clone();
                 spot.insert(Choice {
@@ -247,7 +243,7 @@ impl Select {
     }
 }
 
-impl Choice {
+impl<'c> Choice<'c> {
     fn subscribe(&mut self) {
         self.subscribe = self.subscribe.subscribe();
     }
@@ -264,8 +260,8 @@ impl Choice {
     }
 }
 
-impl MaybeSubscribed {
-    fn subscribe(&self) -> MaybeSubscribed {
+impl<'c> MaybeSubscribed<'c> {
+    fn subscribe(&self) -> MaybeSubscribed<'c> {
         match *self {
             MaybeSubscribed::No(ref sub) => MaybeSubscribed::Yes(sub()),
             MaybeSubscribed::Yes(key) => MaybeSubscribed::Yes(key),
@@ -280,7 +276,7 @@ impl MaybeSubscribed {
     }
 }
 
-impl Drop for Select {
+impl<'c> Drop for Select<'c> {
     fn drop(&mut self) {
         for (_, choice) in &mut self.choices {
             choice.unsubscribe();

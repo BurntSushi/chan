@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar};
 
 pub use async::AsyncChannel;
 pub use sync::{SyncSender, SyncReceiver, sync_channel};
-pub use select::{Choose, Select, ChoiceKey, SelectSendHandle, SelectRecvHandle};
+pub use select::{Choose, Select, SelectSendHandle, SelectRecvHandle};
 pub use wait_group::WaitGroup;
 
 mod async;
@@ -22,7 +22,7 @@ mod wait_group;
 pub trait Channel {
     type Item;
 
-    fn id(&self) -> u64;
+    fn id(&self) -> ChannelId;
     fn subscribe(&self, condvar: Arc<Condvar>) -> u64;
     fn unsubscribe(&self, key: u64);
 }
@@ -42,7 +42,7 @@ pub trait Receiver: Channel {
 impl<'a, T: Channel> Channel for &'a T {
     type Item = T::Item;
 
-    fn id(&self) -> u64 { (*self).id() }
+    fn id(&self) -> ChannelId { (*self).id() }
 
     fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
         (*self).subscribe(condvar)
@@ -80,6 +80,25 @@ impl<C: Receiver> Iterator for Iter<C> {
     fn next(&mut self) -> Option<C::Item> { self.chan.recv() }
 }
 
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ChannelId(ChannelKey);
+
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+enum ChannelKey {
+    Sender(u64),
+    Receiver(u64),
+}
+
+impl ChannelId {
+    fn sender(id: u64) -> ChannelId {
+        ChannelId(ChannelKey::Sender(id))
+    }
+
+    fn receiver(id: u64) -> ChannelId {
+        ChannelId(ChannelKey::Receiver(id))
+    }
+}
+
 #[macro_export]
 macro_rules! select_chan {
     ($select:ident, default => $default:expr, $(
@@ -96,8 +115,8 @@ macro_rules! select_chan {
         $(-> $name:pat)* => $code:expr
     ),+) => {{
         let mut sel = &mut $select;
-        $(let $chan = sel.$meth($chan.clone() $(, $send)*);)+
-        let which = sel.select(true);
+        $(let $chan = sel.$meth(&$chan $(, $send)*);)+
+        let which = sel.try_select();
         $(if which == Some($chan.id()) {
             $(let $name = $chan.into_value();)*
             $code
@@ -117,8 +136,8 @@ macro_rules! select_chan {
         $(-> $name:pat)* => $code:expr
     ),+) => {{
         let mut sel = &mut $select;
-        $(let $chan = sel.$meth($chan.clone() $(, $send)*);)+
-        let which = sel.select(false).unwrap();
+        $(let $chan = sel.$meth(&$chan $(, $send)*);)+
+        let which = sel.select();
         $(if which == $chan.id() {
             $(let $name = $chan.into_value();)*
             $code
@@ -226,12 +245,12 @@ mod tests {
         let (sticka, rticka) = sync_channel(1);
         let (stickb, rtickb) = sync_channel(1);
         let (stickc, rtickc) = sync_channel(1);
-        let (send, recv) = sync_channel::<()>(0);
+        let (send, recv) = sync_channel::<String>(0);
         thread::spawn(move || {
             loop {
                 sticka.send("ticka");
                 thread::sleep_ms(100);
-                recv.recv();
+                println!("RECV: {:?}", recv.recv());
             }
         });
         thread::spawn(move || {
@@ -251,7 +270,7 @@ mod tests {
                 rticka.recv() -> val => println!("{:?}", val),
                 rtickb.recv() -> val => println!("{:?}", val),
                 rtickc.recv() => stop = true,
-                send.send(()) => println!("SENT!"),
+                send.send("fubar".to_owned()) => println!("SENT!"),
             }
             if stop {
                 break;

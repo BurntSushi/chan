@@ -4,7 +4,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
 
 use notifier::Notifier;
-use {Channel, Receiver, Sender};
+use {Channel, Receiver, Sender, ChannelId};
 
 static NEXT_CHANNEL_ID: AtomicUsize = ATOMIC_USIZE_INIT;
 
@@ -57,8 +57,8 @@ impl<T> AsyncChannel<T> {
 impl<T> Channel for AsyncChannel<T> {
     type Item = T;
 
-    fn id(&self) -> u64 {
-        self.0.id
+    fn id(&self) -> ChannelId {
+        ChannelId::sender(self.0.id)
     }
 
     fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {

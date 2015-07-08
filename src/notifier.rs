@@ -2,6 +2,22 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex};
 
+// This data structure is used to track subscriptions to channels.
+//
+// The flow is that when a "select" like construct is made, then it must
+// tell the channels it wants to synchronize with to notify it when some
+// activity occurs (which may cause the "select" to resolve one of the
+// synchronization events). This is managed by a simple pub/sub model below.
+//
+// This implementation is extremely naive and probably very inefficient.
+// Notably, *every* channel send/recv calls `notify`, which needs to acquire
+// a lock and broadcast to every select's condition variable.
+//
+// N.B. next_id does checked arithmetic, so if one channel is exposed to
+// 2^64 subscribers (not necessarily at the same time), then the program
+// will crash. This seems like a bad limitation, but like I said, this is
+// a naive implementation.
+
 pub struct Notifier(Mutex<Inner>);
 
 struct Inner {
@@ -18,7 +34,7 @@ impl Notifier {
     }
 
     pub fn notify(&self) {
-        let notify = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let notify = self.0.lock().unwrap();
         for condvar in notify.subscriptions.values() {
             condvar.notify_all();
         }

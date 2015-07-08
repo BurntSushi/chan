@@ -1,41 +1,43 @@
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub struct Tracker(Mutex<TrackerCounts>);
+// A tracker that reference counts the two sides of a channel.
+//
+// After writing this, it seems like a blatant (and naive) reproduction of
+// `Arc`. Can we instead just use `Arc` with a `Drop` impl on the inner type?
 
-struct TrackerCounts {
-    senders: usize,
-    receivers: usize,
+pub struct Tracker {
+    senders: AtomicUsize,
+    receivers: AtomicUsize,
 }
 
 impl Tracker {
     pub fn new() -> Tracker {
-        Tracker(Mutex::new(TrackerCounts { senders: 0, receivers: 0 }))
+        Tracker {
+            senders: AtomicUsize::new(0),
+            receivers: AtomicUsize::new(0),
+        }
     }
 
     pub fn add_sender(&self) {
-        let mut counts = self.0.lock().unwrap();
-        counts.senders += 1;
+        self.senders.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn add_receiver(&self) {
-        let mut counts = self.0.lock().unwrap();
-        counts.receivers += 1;
+        self.receivers.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn remove_sender<F: FnMut()>(&self, mut at_zero: F) {
-        let mut counts = self.0.lock().unwrap();
-        assert!(counts.senders > 0);
-        counts.senders -= 1;
-        if counts.senders == 0 {
+        let prev = self.senders.fetch_sub(1, Ordering::SeqCst);
+        assert!(prev > 0);
+        if prev == 1 {
             at_zero();
         }
     }
 
     pub fn remove_receiver<F: FnMut()>(&self, mut at_zero: F) {
-        let mut counts = self.0.lock().unwrap();
-        assert!(counts.receivers > 0);
-        counts.receivers -= 1;
-        if counts.receivers == 0 {
+        let prev = self.receivers.fetch_sub(1, Ordering::SeqCst);
+        assert!(prev > 0);
+        if prev == 1 {
             at_zero();
         }
     }

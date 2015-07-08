@@ -5,8 +5,16 @@ use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
 
 use notifier::Notifier;
 use tracker::Tracker;
-use {Channel, Receiver, Sender};
+use {Channel, Receiver, Sender, ChannelId};
 
+// This enables us to (in practice) uniquely identify any particular channel.
+// A better approach would be to use the pointer's address in memory, but it
+// looks like `Arc` doesn't support that (yet?).
+//
+// Any other ideas? ---AG
+//
+// N.B. This is combined with ChannelId to distinguish between the sending
+// and receiving halves of a channel.
 static NEXT_CHANNEL_ID: AtomicUsize = ATOMIC_USIZE_INIT;
 
 pub fn sync_channel<T>(size: usize) -> (SyncSender<T>, SyncReceiver<T>) {
@@ -128,6 +136,13 @@ impl<T> SyncChannel<T> {
         self.track().add_receiver();
         SyncReceiver(self)
     }
+
+    fn close(&self) {
+        match *self.0 {
+            SyncInner::Unbuffered(ref i) => i.close(),
+            SyncInner::Buffered(ref i) => i.close(),
+        }
+    }
 }
 
 impl<T> Clone for SyncChannel<T> {
@@ -163,8 +178,8 @@ impl<T> Drop for SyncReceiver<T> {
 impl<T> Channel for SyncSender<T> {
     type Item = T;
 
-    fn id(&self) -> u64 {
-        self.0.id()
+    fn id(&self) -> ChannelId {
+        ChannelId::sender(self.0.id())
     }
 
     fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
@@ -179,8 +194,8 @@ impl<T> Channel for SyncSender<T> {
 impl<T> Channel for SyncReceiver<T> {
     type Item = T;
 
-    fn id(&self) -> u64 {
-        self.0.id()
+    fn id(&self) -> ChannelId {
+        ChannelId::receiver(self.0.id())
     }
 
     fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
@@ -208,10 +223,7 @@ impl<T> Sender for SyncSender<T> {
     }
 
     fn close(&self) {
-        match *(self.0).0 {
-            SyncInner::Unbuffered(ref i) => i.close(),
-            SyncInner::Buffered(ref i) => i.close(),
-        }
+        self.0.close();
     }
 }
 
@@ -238,6 +250,7 @@ impl<T> Buffered<T> {
         // channel is already closed, then the condition variable may
         // never be woken up again, and thus, we'll be dead-locked.
         if ring.closed {
+            drop(ring); // don't poison
             panic!("cannot send on a closed channel");
         }
         while ring.len == self.cap {
@@ -251,6 +264,7 @@ impl<T> Buffered<T> {
         // absolutely cannot abide adding to the queue if the channel
         // has been closed.
         if ring.closed {
+            drop(ring); // don't poison
             panic!("cannot send on a closed channel");
         }
         ring.push(val);
@@ -277,7 +291,7 @@ impl<T> Buffered<T> {
     }
 
     fn close(&self) {
-        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ring = self.ring.lock().unwrap();
         ring.closed = true;
         self.cond.notify_all();
         self.notify.notify();
@@ -317,38 +331,40 @@ impl<T: fmt::Debug> fmt::Debug for Buffered<T> {
 
 impl<T> Unbuffered<T> {
     fn send(&self, send_val: T, try: bool) -> Result<(), T> {
-        {
-            let _sender_lock = self.sender.lock().unwrap();
-            if try && self.nwaiting.load(Ordering::SeqCst) == 0 {
-                return Err(send_val);
-            }
-            // Since the sender lock has been acquired, that implies any
-            // previous senders have completed, which implies that all
-            // receivers that could make progress have made progress, and the
-            // rest are blocked. Therefore, `val` must be `None`.
-            let mut val = self.val.lock().unwrap();
-            if val.closed {
-                panic!("cannot send on a closed channel");
-            }
-            val.val = Some(send_val);
-            self.cond.notify_all();
-            self.notify.notify();
-            // At this point, any blocked receivers have woken up and will race
-            // to access `val`. So we release the mutex but continue blocking
-            // until a receiver has retrieved the value.
-            // If there are no blocked receivers, then we continue blocking
-            // until there is one that grabs the value.
-            while val.val.is_some() {
-                // It's possible we could wake up here by the broadcast from
-                // `close`, but that's OK: the value was added to the queue
-                // before `close` was called, which means a receiver can still
-                // retrieve it.
-                val = self.cond.wait(val).unwrap();
-            }
-            // OK, if we're here, then the value we put in has been slurped up
-            // by a received *and* we've re-acquired the `val` lock. Now we
-            // release it and the sender lock to permit other senders to try.
+        let _sender_lock = self.sender.lock().unwrap();
+        if try && self.nwaiting.load(Ordering::SeqCst) == 0 {
+            return Err(send_val);
         }
+        // Since the sender lock has been acquired, that implies any
+        // previous senders have completed, which implies that all
+        // receivers that could make progress have made progress, and the
+        // rest are blocked. Therefore, `val` must be `None`.
+        let mut val = self.val.lock().unwrap();
+        if val.closed {
+            drop(val); // don't poison
+            drop(_sender_lock); // don't poison
+            panic!("cannot send on a closed channel");
+        }
+        val.val = Some(send_val);
+        self.cond.notify_all();
+        self.notify.notify();
+        // At this point, any blocked receivers have woken up and will race
+        // to access `val`. So we release the mutex but continue blocking
+        // until a receiver has retrieved the value.
+        // If there are no blocked receivers, then we continue blocking
+        // until there is one that grabs the value.
+        while val.val.is_some() {
+            // It's possible we could wake up here by the broadcast from
+            // `close`, but that's OK: the value was added to the queue
+            // before `close` was called, which means a receiver can still
+            // retrieve it.
+            val = self.cond.wait(val).unwrap();
+        }
+        // OK, if we're here, then the value we put in has been slurped up
+        // by a receiver *and* we've re-acquired the `val` lock. Now we
+        // release it and the sender lock to permit other senders to try.
+        drop(val);
+        drop(_sender_lock);
         // We notify after the lock has been released so that the next time
         // a sender tries to send, it will absolutely not be blocked by *this*
         // send.
@@ -376,14 +392,7 @@ impl<T> Unbuffered<T> {
     }
 
     fn close(&self) {
-        // It's unclear to me what this code should do if the mutex is
-        // poisoned. This code path happens when the program panics and the
-        // destructor for the last sender is run. It seems like we should mush
-        // on and let the program continue as normally as we can. That means
-        // notifying other threads that this channel has been closed.
-        // But of course, this also means that notification must also handle
-        // poisoned mutexes. Blech.
-        let mut val = self.val.lock().unwrap_or_else(|e| e.into_inner());
+        let mut val = self.val.lock().unwrap();
         val.closed = true;
         // If there are any blocked receivers, this will wake them up and
         // force them to return.
