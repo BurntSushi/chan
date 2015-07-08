@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar};
 
 pub use async::AsyncChannel;
 pub use sync::{SyncSender, SyncReceiver, sync_channel};
-pub use select::{Choose, Select, SelectHandle};
+pub use select::{Choose, Select, ChoiceKey, SelectSendHandle, SelectRecvHandle};
 pub use wait_group::WaitGroup;
 
 mod async;
@@ -80,13 +80,64 @@ impl<C: Receiver> Iterator for Iter<C> {
     fn next(&mut self) -> Option<C::Item> { self.chan.recv() }
 }
 
+#[macro_export]
+macro_rules! select_chan {
+    ($select:ident, default => $default:expr, $(
+        $chan:ident.$meth:ident($($send:expr)*)
+        $(-> $name:pat)* => $code:expr,
+    )+) => {
+        select_chan!(
+            $select,
+            default => $default,
+            $($chan.$meth($($send)*) $(-> $name)* => $code),+);
+    };
+    ($select:ident, default => $default:expr, $(
+        $chan:ident.$meth:ident($($send:expr)*)
+        $(-> $name:pat)* => $code:expr
+    ),+) => {{
+        let mut sel = &mut $select;
+        $(let $chan = sel.$meth($chan.clone() $(, $send)*);)+
+        let which = sel.select(true);
+        $(if which == Some($chan.id()) {
+            $(let $name = $chan.into_value();)*
+            $code
+        } else)+
+        { $default }
+    }};
+    ($select:ident, $(
+        $chan:ident.$meth:ident($($send:expr)*)
+        $(-> $name:pat)* => $code:expr,
+    )+) => {
+        select_chan!(
+            $select,
+            $($chan.$meth($($send)*) $(-> $name)* => $code),+);
+    };
+    ($select:ident, $(
+        $chan:ident.$meth:ident($($send:expr)*)
+        $(-> $name:pat)* => $code:expr
+    ),+) => {{
+        let mut sel = &mut $select;
+        $(let $chan = sel.$meth($chan.clone() $(, $send)*);)+
+        let which = sel.select(false).unwrap();
+        $(if which == $chan.id() {
+            $(let $name = $chan.into_value();)*
+            $code
+        } else)+
+        { unreachable!() }
+    }};
+    ($($tt:tt)*) => {{
+        let mut sel = Select::new();
+        select_chan!(sel, $($tt)*);
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
 
     use super::{
         Sender, Receiver,
-        Choose, Select, AsyncChannel, WaitGroup,
+        Select, Choose, AsyncChannel, WaitGroup,
         sync_channel,
     };
 
@@ -194,15 +245,14 @@ mod tests {
             stickc.send(());
         });
 
-        let mut sel = Select::new();
         loop {
             let mut stop = false;
-            sel.handle()
-            .recv(&rticka, |val| println!("{:?}", val))
-            .recv(&rtickb, |val| println!("{:?}", val))
-            .recv(&rtickc, |val| { stop = true; println!("{:?}", val) })
-            .send(&send, (), || println!("SENT!"))
-            .select();
+            select_chan! {
+                rticka.recv() -> val => println!("{:?}", val),
+                rtickb.recv() -> val => println!("{:?}", val),
+                rtickc.recv() => stop = true,
+                send.send(()) => println!("SENT!"),
+            }
             if stop {
                 break;
             }

@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::collections::hash_map::{HashMap, Entry};
 use std::ops::Drop;
+use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 
 use rand::{self, Rng};
@@ -72,177 +74,180 @@ impl<'a, T> Drop for Choose<'a, T> {
 // `Arc` because it would be silly to shoehorn its use with `Copy` types
 // (or other types that are cheap to clone).
 
-pub struct Select<'s> {
+pub struct Select {
     cond: Arc<Condvar>,
     cond_mutex: Mutex<()>,
-    choices: Vec<Choice<'s>>,
-    senders: HashMap<u64, usize>,
-    receivers: HashMap<u64, usize>,
+    choices: HashMap<ChoiceKey, Choice>,
 }
 
-struct Choice<'s> {
-    subscribe: MaybeSubscribed<'s>,
-    unsubscribe: Box<Fn(u64) + 's>,
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ChoiceKey {
+    Sender(u64),
+    Receiver(u64),
 }
 
-enum MaybeSubscribed<'s> {
-    No(Box<Fn() -> u64 + 's>),
+struct Choice {
+    subscribe: MaybeSubscribed,
+    unsubscribe: Box<Fn(u64) + 'static>,
+    try: Box<FnMut() -> bool + 'static>,
+}
+
+enum MaybeSubscribed {
+    No(Box<Fn() -> u64 + 'static>),
     Yes(u64),
 }
 
-pub struct SelectHandle<'r, 's: 'r, 'run> {
-    select: &'r mut Select<'s>,
-    runs: HashMap<usize, Box<FnMut() -> bool + 'run>>,
-    default: Option<Box<FnMut() + 'run>>,
+#[derive(Debug)]
+pub struct SelectSendHandle<S> {
+    chan: S,
 }
 
-impl<'s> Select<'s> {
-    pub fn new() -> Select<'s> {
+#[derive(Debug)]
+pub struct SelectRecvHandle<R, T> {
+    chan: R,
+    val: Rc<RefCell<Option<Option<T>>>>,
+}
+
+impl<S: Sender> SelectSendHandle<S> {
+    pub fn id(&self) -> ChoiceKey {
+        ChoiceKey::Sender(self.chan.id())
+    }
+}
+
+impl<R: Receiver<Item=T>, T> SelectRecvHandle<R, T> {
+    pub fn id(&self) -> ChoiceKey {
+        ChoiceKey::Receiver(self.chan.id())
+    }
+
+    pub fn into_value(self) -> Option<T> {
+        let val = self.val.borrow_mut().take().unwrap();
+        val
+    }
+}
+
+impl Select {
+    pub fn new() -> Select {
         Select {
             cond: Arc::new(Condvar::new()),
             cond_mutex: Mutex::new(()),
-            choices: vec![],
-            senders: HashMap::new(),
-            receivers: HashMap::new(),
+            choices: HashMap::new(),
         }
     }
 
     fn is_subscribed(&self) -> bool {
-        self.choices.is_empty() || self.choices[0].is_subscribed()
+        self.choices.is_empty()
+            || self.choices.values().next().unwrap().is_subscribed()
     }
 
-    pub fn handle<'r, 'run>(&'r mut self) -> SelectHandle<'r, 's, 'run> {
-        let runs = HashMap::with_capacity(self.choices.len());
-        SelectHandle {
-            select: self,
-            runs: runs,
-            default: None,
-        }
-    }
-}
-
-impl<'r, 's, 'run> SelectHandle<'r, 's, 'run> {
-    pub fn select(mut self) {
+    pub fn select(&mut self, default: bool) -> Option<ChoiceKey> {
         let mut first = true;
-        while !self.try() {
+        loop {
+            if let Some(key) = self.try() {
+                return Some(key);
+            }
             if first {
-                match self.default {
-                    Some(ref mut default) => { default(); return; }
-                    _ => {}
+                if default {
+                    return None;
                 }
                 // At this point, we've tried to pick one of the
                 // synchronization events without initiating a subscription,
                 // but nothing succeeded. Before we sit and wait, we need to
                 // tell all of our channels to notify us when something
                 // changes.
-                if !self.select.is_subscribed() {
-                    for choice in &mut self.select.choices {
+                if !self.is_subscribed() {
+                    for (_, choice) in &mut self.choices {
                         choice.subscribe();
                     }
                 }
             }
             first = false;
-            let _ = self.select.cond.wait(
-                self.select.cond_mutex.lock().unwrap()).unwrap();
+            let _ = self.cond.wait(self.cond_mutex.lock().unwrap()).unwrap();
         }
     }
 
-    fn try(&mut self) -> bool {
-        for (i, _) in self.select.choices.iter_mut().enumerate() {
-            if let Some(run) = self.runs.get_mut(&i) {
-                if run() {
-                    return true;
-                }
+    fn try(&mut self) -> Option<ChoiceKey> {
+        for (&key, choice) in &mut self.choices {
+            if (choice.try)() {
+                return Some(key);
             }
         }
-        false
+        None
     }
 
-    pub fn default<F>(
-        mut self,
-        run: F,
-    ) -> SelectHandle<'r, 's, 'run> where F: FnMut() + 'run {
-        self.default = Some(Box::new(run));
-        self
-    }
-
-    pub fn send<'c: 's + 'run, C, T, F>(
-        mut self,
-        chan: C,
+    pub fn send<S, T>(
+        &mut self,
+        chan: S,
         val: T,
-        mut run: F,
-    ) -> SelectHandle<'r, 's, 'run>
-    where C: Sender<Item=T> + Clone + 'c,
-          T: 'run,
-          F: FnMut() + 'run {
+    ) -> SelectSendHandle<S>
+    where S: Sender<Item=T> + Clone + 'static, T: 'static {
+        let key = ChoiceKey::Sender(chan.id());
         let mut val = Some(val);
         let chan2 = chan.clone();
-        let boxed_run = Box::new(move || {
+        let boxed_try = Box::new(move || {
             let v = match val.take() {
                 Some(v) => v,
                 None => return false,
             };
-            match chan.try_send(v) {
-                Ok(()) => { run(); true }
+            match chan2.try_send(v) {
+                Ok(()) => true,
                 Err(val2) => { val = Some(val2); false }
             }
         });
-        match self.select.senders.entry(chan2.id()) {
-            Entry::Occupied(idx) => {
-                self.runs.insert(*idx.get(), boxed_run);
+        match self.choices.entry(key) {
+            Entry::Occupied(mut choice) => {
+                choice.get_mut().try = boxed_try;
             }
             Entry::Vacant(spot) => {
-                let chan3 = chan2.clone();
-                let condvar = self.select.cond.clone();
-                spot.insert(self.select.choices.len());
-                self.runs.insert(self.select.choices.len(), boxed_run);
-                self.select.choices.push(Choice {
+                let (chan2, chan3) = (chan.clone(), chan.clone());
+                let condvar = self.cond.clone();
+                spot.insert(Choice {
                     subscribe: MaybeSubscribed::No(Box::new(move || {
                         chan2.subscribe(condvar.clone())
                     })),
                     unsubscribe: Box::new(move |key| chan3.unsubscribe(key)),
+                    try: boxed_try,
                 });
             }
         }
-        self
+        SelectSendHandle { chan: chan }
     }
 
-    pub fn recv<'c: 's + 'run, C, T, F>(
-        mut self,
-        chan: C,
-        mut run: F,
-    ) -> SelectHandle<'r, 's, 'run>
-    where C: Receiver<Item=T> + Clone + 'c,
-          F: FnMut(Option<T>) + 'run {
+    pub fn recv<R, T>(
+        &mut self,
+        chan: R,
+    ) -> SelectRecvHandle<R, T>
+    where R: Receiver<Item=T> + Clone + 'static, T: 'static {
+        let key = ChoiceKey::Receiver(chan.id());
+        let recv_val = Rc::new(RefCell::new(None));
+        let recv_val2 = recv_val.clone();
         let chan2 = chan.clone();
-        let boxed_run = Box::new(move || {
-            match chan.try_recv() {
-                Ok(val) => { run(val); true }
+        let boxed_try = Box::new(move || {
+            match chan2.try_recv() {
+                Ok(val) => { *recv_val2.borrow_mut() = Some(val); true }
                 Err(()) => false,
             }
         });
-        match self.select.receivers.entry(chan2.id()) {
-            Entry::Occupied(idx) => {
-                self.runs.insert(*idx.get(), boxed_run);
+        match self.choices.entry(key) {
+            Entry::Occupied(mut choice) => {
+                choice.get_mut().try = boxed_try;
             }
             Entry::Vacant(spot) => {
-                let chan3 = chan2.clone();
-                let condvar = self.select.cond.clone();
-                spot.insert(self.select.choices.len());
-                self.runs.insert(self.select.choices.len(), boxed_run);
-                self.select.choices.push(Choice {
+                let (chan2, chan3) = (chan.clone(), chan.clone());
+                let condvar = self.cond.clone();
+                spot.insert(Choice {
                     subscribe: MaybeSubscribed::No(Box::new(move || {
                         chan2.subscribe(condvar.clone())
                     })),
                     unsubscribe: Box::new(move |key| chan3.unsubscribe(key)),
+                    try: boxed_try,
                 });
             }
         }
-        self
+        SelectRecvHandle { chan: chan, val: recv_val }
     }
 }
 
-impl<'a> Choice<'a> {
+impl Choice {
     fn subscribe(&mut self) {
         self.subscribe = self.subscribe.subscribe();
     }
@@ -259,8 +264,8 @@ impl<'a> Choice<'a> {
     }
 }
 
-impl<'a> MaybeSubscribed<'a> {
-    fn subscribe(&self) -> MaybeSubscribed<'a> {
+impl MaybeSubscribed {
+    fn subscribe(&self) -> MaybeSubscribed {
         match *self {
             MaybeSubscribed::No(ref sub) => MaybeSubscribed::Yes(sub()),
             MaybeSubscribed::Yes(key) => MaybeSubscribed::Yes(key),
@@ -275,9 +280,9 @@ impl<'a> MaybeSubscribed<'a> {
     }
 }
 
-impl<'a> Drop for Select<'a> {
+impl Drop for Select {
     fn drop(&mut self) {
-        for choice in &mut self.choices {
+        for (_, choice) in &mut self.choices {
             choice.unsubscribe();
         }
     }
