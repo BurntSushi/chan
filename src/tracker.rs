@@ -41,4 +41,16 @@ impl Tracker {
             at_zero();
         }
     }
+
+    // We may want these methods for detecting deadlock and returning an error.
+
+    #[allow(dead_code)]
+    pub fn any_senders(&self) -> bool {
+        self.senders.load(Ordering::SeqCst) > 0
+    }
+
+    #[allow(dead_code)]
+    pub fn any_receivers(&self) -> bool {
+        self.receivers.load(Ordering::SeqCst) > 0
+    }
 }

@@ -8,59 +8,6 @@ use rand::{self, Rng};
 
 use {Receiver, Sender, ChannelId};
 
-pub struct Choose<'a, T> {
-    cond: Arc<Condvar>,
-    cond_mutex: Mutex<()>,
-    chans: Vec<(u64, Box<Receiver<Item=T> + 'a>)>,
-}
-
-impl<'a, T> Choose<'a, T> {
-    pub fn new() -> Choose<'a, T> {
-        Choose {
-            cond: Arc::new(Condvar::new()),
-            cond_mutex: Mutex::new(()),
-            chans: vec![],
-        }
-    }
-
-    pub fn recv<C>(mut self, chan: C) -> Choose<'a, T>
-            where C: Receiver<Item=T> + 'a {
-        let key = chan.subscribe(self.cond.clone());
-        self.chans.push((key, Box::new(chan)));
-        self
-    }
-
-    pub fn choose(&mut self) -> Option<T> {
-        loop {
-            match self.try_choose() {
-                Ok(v) => return v,
-                Err(()) => {}
-            }
-            let _ = self.cond.wait(self.cond_mutex.lock().unwrap()).unwrap();
-        }
-    }
-
-    pub fn try_choose(&mut self) -> Result<Option<T>, ()> {
-        let mut rng = rand::thread_rng();
-        rng.shuffle(&mut self.chans);
-        for &(_, ref chan) in &self.chans {
-            match chan.try_recv() {
-                Ok(v) => return Ok(v),
-                Err(()) => continue,
-            }
-        }
-        Err(())
-    }
-}
-
-impl<'a, T> Drop for Choose<'a, T> {
-    fn drop(&mut self) {
-        for &(key, ref chan) in &self.chans {
-            chan.unsubscribe(key);
-        }
-    }
-}
-
 pub struct Select<'c> {
     cond: Arc<Condvar>,
     cond_mutex: Mutex<()>,
@@ -280,6 +227,59 @@ impl<'c> Drop for Select<'c> {
     fn drop(&mut self) {
         for (_, choice) in &mut self.choices {
             choice.unsubscribe();
+        }
+    }
+}
+
+pub struct Choose<'a, T> {
+    cond: Arc<Condvar>,
+    cond_mutex: Mutex<()>,
+    chans: Vec<(u64, Box<Receiver<Item=T> + 'a>)>,
+}
+
+impl<'a, T> Choose<'a, T> {
+    pub fn new() -> Choose<'a, T> {
+        Choose {
+            cond: Arc::new(Condvar::new()),
+            cond_mutex: Mutex::new(()),
+            chans: vec![],
+        }
+    }
+
+    pub fn recv<C>(mut self, chan: C) -> Choose<'a, T>
+            where C: Receiver<Item=T> + 'a {
+        let key = chan.subscribe(self.cond.clone());
+        self.chans.push((key, Box::new(chan)));
+        self
+    }
+
+    pub fn choose(&mut self) -> Option<T> {
+        loop {
+            match self.try_choose() {
+                Ok(v) => return v,
+                Err(()) => {}
+            }
+            let _ = self.cond.wait(self.cond_mutex.lock().unwrap()).unwrap();
+        }
+    }
+
+    pub fn try_choose(&mut self) -> Result<Option<T>, ()> {
+        let mut rng = rand::thread_rng();
+        rng.shuffle(&mut self.chans);
+        for &(_, ref chan) in &self.chans {
+            match chan.try_recv() {
+                Ok(v) => return Ok(v),
+                Err(()) => continue,
+            }
+        }
+        Err(())
+    }
+}
+
+impl<'a, T> Drop for Choose<'a, T> {
+    fn drop(&mut self) {
+        for &(key, ref chan) in &self.chans {
+            chan.unsubscribe(key);
         }
     }
 }

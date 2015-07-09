@@ -7,7 +7,7 @@ extern crate rand;
 
 use std::sync::{Arc, Condvar};
 
-pub use async::AsyncChannel;
+pub use async::{AsyncSender, AsyncReceiver, async_channel};
 pub use sync::{SyncSender, SyncReceiver, sync_channel};
 pub use select::{Choose, Select, SelectSendHandle, SelectRecvHandle};
 pub use wait_group::WaitGroup;
@@ -30,7 +30,6 @@ pub trait Channel {
 pub trait Sender: Channel {
     fn send(&self, val: Self::Item);
     fn try_send(&self, val: Self::Item) -> Result<(), Self::Item>;
-    fn close(&self);
 }
 
 pub trait Receiver: Channel {
@@ -57,8 +56,6 @@ impl<'a, T: Sender> Sender for &'a T {
     fn try_send(&self, val: Self::Item) -> Result<(), Self::Item> {
         (*self).try_send(val)
     }
-
-    fn close(&self) { (*self).close() }
 }
 
 impl<'a, T: Receiver> Receiver for &'a T {
@@ -144,8 +141,20 @@ macro_rules! select_chan {
         } else)+
         { unreachable!() }
     }};
+    (default => $default:expr) => {{ $default }};
+    (default => $default:expr,) => {{ $default }};
+    ($select:ident, default => $default:expr) => {{ $default }};
+    ($select:ident, default => $default:expr,) => {{ $default }};
+    ($select:ident) => {{
+        let mut sel = &mut $select;
+        sel.select(); // blocks forever
+    }};
+    () => {{
+        let mut sel = $crate::Select::new();
+        select_chan!(sel);
+    }};
     ($($tt:tt)*) => {{
-        let mut sel = Select::new();
+        let mut sel = $crate::Select::new();
         select_chan!(sel, $($tt)*);
     }};
 }
@@ -155,9 +164,8 @@ mod tests {
     use std::thread;
 
     use super::{
-        Sender, Receiver,
-        Select, Choose, AsyncChannel, WaitGroup,
-        sync_channel,
+        Sender, Receiver, Choose, WaitGroup,
+        async_channel, sync_channel,
     };
 
     #[test]
@@ -176,9 +184,9 @@ mod tests {
 
     #[test]
     fn simple_async() {
-        let chan = AsyncChannel::new();
-        chan.send(5);
-        assert_eq!(chan.recv(), Some(5));
+        let (send, recv) = async_channel();
+        send.send(5);
+        assert_eq!(recv.recv(), Some(5));
     }
 
     #[test]
@@ -195,7 +203,7 @@ mod tests {
 
     #[test]
     fn simple_iter_unbuffered() {
-        let (send, recv) = sync_channel(1);
+        let (send, recv) = sync_channel(0);
         thread::spawn(move || {
             for i in 0..100 {
                 send.send(i);
@@ -207,15 +215,13 @@ mod tests {
 
     #[test]
     fn simple_iter_async() {
-        let chan = AsyncChannel::new();
-        let chan2 = chan.clone();
+        let (send, recv) = async_channel();
         thread::spawn(move || {
             for i in 0..100 {
-                chan2.send(i);
+                send.send(i);
             }
-            chan2.close();
         });
-        let recvd: Vec<i32> = chan.iter().collect();
+        let recvd: Vec<i32> = recv.iter().collect();
         assert_eq!(recvd, (0..100).collect::<Vec<i32>>());
     }
 
@@ -235,9 +241,9 @@ mod tests {
 
     #[test]
     fn simple_try_async() {
-        let chan = AsyncChannel::new();
-        chan.try_recv().is_err();
-        chan.try_send(5).is_ok();
+        let (send, recv) = async_channel();
+        recv.try_recv().is_err();
+        send.try_send(5).is_ok();
     }
 
     #[test]
@@ -276,7 +282,7 @@ mod tests {
                 break;
             }
         }
-        println!("done!");
+        println!("select done!");
     }
 
     #[test]
@@ -306,7 +312,7 @@ mod tests {
                 Message::Fubar => break,
             }
         }
-        println!("done!");
+        println!("choose done!");
     }
 
     #[test]
@@ -336,6 +342,6 @@ mod tests {
         }
         drop(send);
         wg_done.wait();
-        println!("done!");
+        println!("mpmc done!");
     }
 }

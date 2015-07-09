@@ -4,16 +4,30 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
 
 use notifier::Notifier;
+use tracker::Tracker;
 use {Channel, Receiver, Sender, ChannelId};
 
 static NEXT_CHANNEL_ID: AtomicUsize = ATOMIC_USIZE_INIT;
 
+pub fn async_channel<T>() -> (AsyncSender<T>, AsyncReceiver<T>) {
+    let send = AsyncChannel::new();
+    let recv = send.clone();
+    (send.into_sender(), recv.into_receiver())
+}
+
 #[derive(Debug)]
-pub struct AsyncChannel<T>(Arc<AsyncInner<T>>);
+pub struct AsyncSender<T>(AsyncChannel<T>);
+
+#[derive(Debug)]
+pub struct AsyncReceiver<T>(AsyncChannel<T>);
+
+#[derive(Debug)]
+struct AsyncChannel<T>(Arc<AsyncInner<T>>);
 
 struct AsyncInner<T> {
     id: u64,
     notify: Notifier,
+    track: Tracker,
     cond: Condvar,
     queue: Mutex<AsyncQueue<T>>,
 }
@@ -24,10 +38,11 @@ struct AsyncQueue<T> {
 }
 
 impl<T> AsyncChannel<T> {
-    pub fn new() -> AsyncChannel<T> {
+    fn new() -> AsyncChannel<T> {
         AsyncChannel(Arc::new(AsyncInner {
             id: NEXT_CHANNEL_ID.fetch_add(1, Ordering::SeqCst) as u64,
             notify: Notifier::new(),
+            track: Tracker::new(),
             cond: Condvar::new(),
             queue: Mutex::new(AsyncQueue {
                 queue: VecDeque::with_capacity(1024),
@@ -52,35 +67,15 @@ impl<T> AsyncChannel<T> {
         self.0.notify.notify();
         Ok(Some(val))
     }
-}
 
-impl<T> Channel for AsyncChannel<T> {
-    type Item = T;
-
-    fn id(&self) -> ChannelId {
-        ChannelId::sender(self.0.id)
+    fn into_sender(self) -> AsyncSender<T> {
+        self.0.track.add_sender();
+        AsyncSender(self)
     }
 
-    fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
-        self.0.notify.subscribe(condvar)
-    }
-
-    fn unsubscribe(&self, key: u64) {
-        self.0.notify.unsubscribe(key)
-    }
-}
-
-impl<T> Sender for AsyncChannel<T> {
-    fn send(&self, val: T) {
-        self.try_send(val).ok().unwrap();
-    }
-
-    fn try_send(&self, val: T) -> Result<(), T> {
-        let mut queue = self.0.queue.lock().unwrap();
-        queue.queue.push_back(val);
-        self.0.cond.notify_all();
-        self.0.notify.notify();
-        Ok(())
+    fn into_receiver(self) -> AsyncReceiver<T> {
+        self.0.track.add_receiver();
+        AsyncReceiver(self)
     }
 
     fn close(&self) {
@@ -91,19 +86,90 @@ impl<T> Sender for AsyncChannel<T> {
     }
 }
 
-impl<T> Receiver for AsyncChannel<T> {
-    fn recv(&self) -> Option<T> {
-        self._recv(false).unwrap()
-    }
-
-    fn try_recv(&self) -> Result<Option<T>, ()> {
-        self._recv(true)
-    }
-}
-
 impl<T> Clone for AsyncChannel<T> {
     fn clone(&self) -> AsyncChannel<T> {
         AsyncChannel(self.0.clone())
+    }
+}
+
+impl<T> Clone for AsyncSender<T> {
+    fn clone(&self) -> AsyncSender<T> {
+        self.0.clone().into_sender()
+    }
+}
+
+impl<T> Clone for AsyncReceiver<T> {
+    fn clone(&self) -> AsyncReceiver<T> {
+        self.0.clone().into_receiver()
+    }
+}
+
+impl<T> Drop for AsyncSender<T> {
+    fn drop(&mut self) {
+        (self.0).0.track.remove_sender(|| self.0.close());
+    }
+}
+
+impl<T> Drop for AsyncReceiver<T> {
+    fn drop(&mut self) {
+        (self.0).0.track.remove_receiver(||());
+    }
+}
+
+impl<T> Channel for AsyncSender<T> {
+    type Item = T;
+
+    fn id(&self) -> ChannelId {
+        ChannelId::sender((self.0).0.id)
+    }
+
+    fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
+        (self.0).0.notify.subscribe(condvar)
+    }
+
+    fn unsubscribe(&self, key: u64) {
+        (self.0).0.notify.unsubscribe(key)
+    }
+}
+
+impl<T> Channel for AsyncReceiver<T> {
+    type Item = T;
+
+    fn id(&self) -> ChannelId {
+        ChannelId::receiver((self.0).0.id)
+    }
+
+    fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
+        (self.0).0.notify.subscribe(condvar)
+    }
+
+    fn unsubscribe(&self, key: u64) {
+        (self.0).0.notify.unsubscribe(key)
+    }
+}
+
+impl<T> Sender for AsyncSender<T> {
+    fn send(&self, val: T) {
+        self.try_send(val).ok().unwrap();
+    }
+
+    fn try_send(&self, val: T) -> Result<(), T> {
+        let inner = &(self.0).0;
+        let mut queue = inner.queue.lock().unwrap();
+        queue.queue.push_back(val);
+        inner.cond.notify_all();
+        inner.notify.notify();
+        Ok(())
+    }
+}
+
+impl<T> Receiver for AsyncReceiver<T> {
+    fn recv(&self) -> Option<T> {
+        (self.0)._recv(false).unwrap()
+    }
+
+    fn try_recv(&self) -> Result<Option<T>, ()> {
+        (self.0)._recv(true)
     }
 }
 

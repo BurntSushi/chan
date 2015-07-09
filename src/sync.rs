@@ -42,7 +42,6 @@ struct Unbuffered<T> {
     id: u64,
     notify: Notifier,
     track: Tracker,
-    nwaiting: AtomicUsize,
     cond: Condvar,
     sender: Mutex<()>,
     val: Mutex<UnbufferedValue<T>>,
@@ -52,6 +51,7 @@ struct Unbuffered<T> {
 struct UnbufferedValue<T> {
     val: Option<T>,
     closed: bool,
+    nwaiting: usize,
 }
 
 struct Buffered<T> {
@@ -78,12 +78,12 @@ impl<T> SyncChannel<T> {
                 id: NEXT_CHANNEL_ID.fetch_add(1, Ordering::SeqCst) as u64,
                 notify: Notifier::new(),
                 track: Tracker::new(),
-                nwaiting: AtomicUsize::new(0),
                 cond: Condvar::new(),
                 sender: Mutex::new(()),
                 val: Mutex::new(UnbufferedValue {
                     val: None,
                     closed: false,
+                    nwaiting: 0,
                 }),
             })
         } else {
@@ -117,6 +117,14 @@ impl<T> SyncChannel<T> {
         match *self.0 {
             SyncInner::Unbuffered(ref i) => &i.track,
             SyncInner::Buffered(ref i) => &i.track,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn cond_notify(&self) {
+        match *self.0 {
+            SyncInner::Unbuffered(ref i) => i.cond.notify_all(),
+            SyncInner::Buffered(ref i) => i.cond.notify_all(),
         }
     }
 
@@ -165,13 +173,13 @@ impl<T> Clone for SyncReceiver<T> {
 
 impl<T> Drop for SyncSender<T> {
     fn drop(&mut self) {
-        self.0.track().remove_sender(|| self.close());
+        self.0.track().remove_sender(|| self.0.close());
     }
 }
 
 impl<T> Drop for SyncReceiver<T> {
     fn drop(&mut self) {
-        self.0.track().remove_receiver(||());
+        self.0.track().remove_receiver(|| ());
     }
 }
 
@@ -221,10 +229,6 @@ impl<T> Sender for SyncSender<T> {
             SyncInner::Buffered(ref i) => i.send(val, true),
         }
     }
-
-    fn close(&self) {
-        self.0.close();
-    }
 }
 
 impl<T> Receiver for SyncReceiver<T> {
@@ -246,14 +250,14 @@ impl<T> Receiver for SyncReceiver<T> {
 impl<T> Buffered<T> {
     fn send(&self, val: T, try: bool) -> Result<(), T> {
         let mut ring = self.ring.lock().unwrap();
-        // We *need* two of these checks. This is here because if the
-        // channel is already closed, then the condition variable may
-        // never be woken up again, and thus, we'll be dead-locked.
-        if ring.closed {
-            drop(ring); // don't poison
-            panic!("cannot send on a closed channel");
-        }
         while ring.len == self.cap {
+            // We *need* two of these checks. This is here because if the
+            // channel is already closed, then the condition variable may
+            // never be woken up again, and thus, we'll be dead-locked.
+            if ring.closed {
+                drop(ring); // don't poison
+                panic!("cannot send on a closed channel");
+            }
             if try {
                 return Err(val);
             }
@@ -332,9 +336,6 @@ impl<T: fmt::Debug> fmt::Debug for Buffered<T> {
 impl<T> Unbuffered<T> {
     fn send(&self, send_val: T, try: bool) -> Result<(), T> {
         let _sender_lock = self.sender.lock().unwrap();
-        if try && self.nwaiting.load(Ordering::SeqCst) == 0 {
-            return Err(send_val);
-        }
         // Since the sender lock has been acquired, that implies any
         // previous senders have completed, which implies that all
         // receivers that could make progress have made progress, and the
@@ -344,6 +345,9 @@ impl<T> Unbuffered<T> {
             drop(val); // don't poison
             drop(_sender_lock); // don't poison
             panic!("cannot send on a closed channel");
+        }
+        if try && val.nwaiting == 0 {
+            return Err(send_val);
         }
         val.val = Some(send_val);
         self.cond.notify_all();
@@ -381,9 +385,14 @@ impl<T> Unbuffered<T> {
             if try {
                 return Err(());
             }
-            self.nwaiting.fetch_add(1, Ordering::SeqCst);
+            // We need to notify in case there are any blocking sends.
+            // This will wake them up and cause them to try and send
+            // something (after we release the `val` lock).
+            self.notify.notify();
+            self.cond.notify_all();
+            val.nwaiting += 1;
             val = self.cond.wait(val).unwrap();
-            self.nwaiting.fetch_sub(1, Ordering::SeqCst);
+            val.nwaiting -= 1;
         }
         let recv_val = val.val.take().unwrap();
         self.cond.notify_all();
@@ -406,8 +415,6 @@ impl<T: fmt::Debug> fmt::Debug for Unbuffered<T> {
         let val = self.val.lock().unwrap();
         try!(writeln!(f, "Unbuffered {{"));
         try!(writeln!(f, "    notify: {:?}", self.notify));
-        try!(writeln!(f, "    nwaiting: {:?}",
-                      self.nwaiting.load(Ordering::SeqCst)));
         try!(writeln!(f, "    val: {:?}", *val));
         try!(writeln!(f, "}}"));
         Ok(())

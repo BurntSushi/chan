@@ -12,3 +12,6 @@ license = "Unlicense/MIT"
 
 [dependencies]
 rand = "0.3"
+
+[dev-dependencies]
+hyper = "*"

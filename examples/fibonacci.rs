@@ -1,0 +1,35 @@
+#[macro_use]
+extern crate chan;
+
+use std::thread;
+
+use chan::{Receiver, Sender, SyncReceiver, SyncSender};
+
+fn fibonacci(c: SyncSender<u64>, quit: SyncReceiver<()>) {
+    let (mut x, mut y) = (0, 1);
+    loop {
+        select_chan! {
+            c.send(x) => {
+                let oldx = x;
+                x = y;
+                y = oldx + y;
+            },
+            quit.recv() => {
+                println!("quit");
+                return;
+            }
+        }
+    }
+}
+
+fn main() {
+    let (csend, crecv) = chan::sync_channel(0);
+    let (qsend, qrecv) = chan::sync_channel(0);
+    thread::spawn(move || {
+        for _ in 0..10 {
+            println!("{}", crecv.recv().unwrap());
+        }
+        qsend.send(());
+    });
+    fibonacci(csend, qrecv);
+}
