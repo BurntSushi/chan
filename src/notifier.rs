@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 // This data structure is used to track subscriptions to channels.
 //
@@ -18,45 +18,64 @@ use std::sync::{Arc, Condvar, Mutex};
 // will crash. This seems like a bad limitation, but like I said, this is
 // a naive implementation.
 
-pub struct Notifier(Mutex<Inner>);
+pub struct Notifier(RwLock<Inner>);
 
 struct Inner {
     next_id: u64,
-    subscriptions: HashMap<u64, Arc<Condvar>>,
+    subscriptions: HashMap<u64, Subscription>,
+}
+
+struct Subscription {
+    id: u64,
+    mutex: Arc<Mutex<()>>,
+    cond: Arc<Condvar>,
 }
 
 impl Notifier {
     pub fn new() -> Notifier {
-        Notifier(Mutex::new(Inner {
+        Notifier(RwLock::new(Inner {
             next_id: 0,
             subscriptions: HashMap::new(),
         }))
     }
 
-    pub fn notify(&self) {
-        let notify = self.0.lock().unwrap();
-        for condvar in notify.subscriptions.values() {
-            condvar.notify_all();
+    pub fn notify(&self, from: Option<u64>) {
+        let notify = self.0.read().unwrap();
+        for sub in notify.subscriptions.values() {
+            if Some(sub.id) == from {
+                continue;
+            }
+            let _lock = sub.mutex.lock().unwrap();
+            sub.cond.notify_all();
         }
     }
 
-    pub fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
-        let mut notify = self.0.lock().unwrap();
+    pub fn subscribe(
+        &self,
+        from_id: u64,
+        mutex: Arc<Mutex<()>>,
+        condvar: Arc<Condvar>,
+    ) -> u64 {
+        let mut notify = self.0.write().unwrap();
         let id = notify.next_id;
         notify.next_id = notify.next_id.checked_add(1).unwrap();
-        notify.subscriptions.insert(id, condvar);
+        notify.subscriptions.insert(id, Subscription {
+            id: from_id,
+            mutex: mutex,
+            cond: condvar,
+        });
         id
     }
 
     pub fn unsubscribe(&self, key: u64) {
-        let mut notify = self.0.lock().unwrap();
+        let mut notify = self.0.write().unwrap();
         notify.subscriptions.remove(&key);
     }
 }
 
 impl fmt::Debug for Notifier {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let notify = self.0.lock().unwrap();
+        let notify = self.0.read().unwrap();
         writeln!(f, "Notifier({:?})",
                  notify.subscriptions.keys().collect::<Vec<_>>())
     }

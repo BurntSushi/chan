@@ -10,8 +10,8 @@ use chan::{Receiver, Sender, SyncReceiver, SyncSender};
 type Buffer = Vec<u8>;
 
 fn main() {
-    let (free_send, free_recv) = chan::sync_channel(100);
-    let (serv_send, serv_recv) = chan::sync_channel(0);
+    let (free_send, free_recv) = chan::sync(100);
+    let (serv_send, serv_recv) = chan::sync(0);
 
     thread::spawn(move || client(free_recv, serv_send));
     thread::spawn(move || server(free_send, serv_recv));

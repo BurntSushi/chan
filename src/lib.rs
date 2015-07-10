@@ -5,10 +5,10 @@ a (possible empty) fixed size buffer.
 
 extern crate rand;
 
-use std::sync::{Arc, Condvar};
+use std::sync::{Arc, Condvar, Mutex};
 
-pub use async::{AsyncSender, AsyncReceiver, async_channel};
-pub use sync::{SyncSender, SyncReceiver, sync_channel};
+pub use async::{AsyncSender, AsyncReceiver, async};
+pub use sync::{SyncSender, SyncReceiver, sync};
 pub use select::{Choose, Select, SelectSendHandle, SelectRecvHandle};
 pub use wait_group::WaitGroup;
 
@@ -23,18 +23,20 @@ pub trait Channel {
     type Item;
 
     fn id(&self) -> ChannelId;
-    fn subscribe(&self, condvar: Arc<Condvar>) -> u64;
+    fn subscribe(&self, id: u64, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64;
     fn unsubscribe(&self, key: u64);
 }
 
 pub trait Sender: Channel {
     fn send(&self, val: Self::Item);
     fn try_send(&self, val: Self::Item) -> Result<(), Self::Item>;
+    fn try_send_from(&self, val: Self::Item, id: u64) -> Result<(), Self::Item>;
 }
 
 pub trait Receiver: Channel {
     fn recv(&self) -> Option<Self::Item>;
     fn try_recv(&self) -> Result<Option<Self::Item>, ()>;
+    fn try_recv_from(&self, id: u64) -> Result<Option<Self::Item>, ()>;
     fn iter(self) -> Iter<Self> where Self: Sized { Iter::new(self) }
 }
 
@@ -43,8 +45,8 @@ impl<'a, T: Channel> Channel for &'a T {
 
     fn id(&self) -> ChannelId { (*self).id() }
 
-    fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
-        (*self).subscribe(condvar)
+    fn subscribe(&self, id: u64, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64 {
+        (*self).subscribe(id, mutex, condvar)
     }
 
     fn unsubscribe(&self, key: u64) { (*self).unsubscribe(key) }
@@ -56,12 +58,20 @@ impl<'a, T: Sender> Sender for &'a T {
     fn try_send(&self, val: Self::Item) -> Result<(), Self::Item> {
         (*self).try_send(val)
     }
+
+    fn try_send_from(&self, val: Self::Item, id: u64) -> Result<(), Self::Item> {
+        (*self).try_send_from(val, id)
+    }
 }
 
 impl<'a, T: Receiver> Receiver for &'a T {
     fn recv(&self) -> Option<Self::Item> { (*self).recv() }
 
     fn try_recv(&self) -> Result<Option<Self::Item>, ()> { (*self).try_recv() }
+
+    fn try_recv_from(&self, id: u64) -> Result<Option<Self::Item>, ()> {
+        (*self).try_recv_from(id)
+    }
 }
 
 pub struct Iter<C> {
@@ -165,33 +175,33 @@ mod tests {
 
     use super::{
         Sender, Receiver, Choose, WaitGroup,
-        async_channel, sync_channel,
+        async, sync,
     };
 
     #[test]
     fn simple() {
-        let (send, recv) = sync_channel(1);
+        let (send, recv) = sync(1);
         send.send(5);
         assert_eq!(recv.recv(), Some(5));
     }
 
     #[test]
     fn simple_unbuffered() {
-        let (send, recv) = sync_channel(0);
+        let (send, recv) = sync(0);
         thread::spawn(move || send.send(5));
         assert_eq!(recv.recv(), Some(5));
     }
 
     #[test]
     fn simple_async() {
-        let (send, recv) = async_channel();
+        let (send, recv) = async();
         send.send(5);
         assert_eq!(recv.recv(), Some(5));
     }
 
     #[test]
     fn simple_iter() {
-        let (send, recv) = sync_channel(1);
+        let (send, recv) = sync(1);
         thread::spawn(move || {
             for i in 0..100 {
                 send.send(i);
@@ -203,7 +213,7 @@ mod tests {
 
     #[test]
     fn simple_iter_unbuffered() {
-        let (send, recv) = sync_channel(0);
+        let (send, recv) = sync(0);
         thread::spawn(move || {
             for i in 0..100 {
                 send.send(i);
@@ -215,7 +225,7 @@ mod tests {
 
     #[test]
     fn simple_iter_async() {
-        let (send, recv) = async_channel();
+        let (send, recv) = async();
         thread::spawn(move || {
             for i in 0..100 {
                 send.send(i);
@@ -227,31 +237,31 @@ mod tests {
 
     #[test]
     fn simple_try() {
-        let (send, recv) = sync_channel(1);
+        let (send, recv) = sync(1);
         send.try_send(5).is_err();
         recv.try_recv().is_err();
     }
 
     #[test]
     fn simple_try_unbuffered() {
-        let (send, recv) = sync_channel(0);
+        let (send, recv) = sync(0);
         send.try_send(5).is_err();
         recv.try_recv().is_err();
     }
 
     #[test]
     fn simple_try_async() {
-        let (send, recv) = async_channel();
+        let (send, recv) = async();
         recv.try_recv().is_err();
         send.try_send(5).is_ok();
     }
 
     #[test]
     fn select() {
-        let (sticka, rticka) = sync_channel(1);
-        let (stickb, rtickb) = sync_channel(1);
-        let (stickc, rtickc) = sync_channel(1);
-        let (send, recv) = sync_channel::<String>(0);
+        let (sticka, rticka) = sync(1);
+        let (stickb, rtickb) = sync(1);
+        let (stickc, rtickc) = sync(1);
+        let (send, recv) = sync(0);
         thread::spawn(move || {
             loop {
                 sticka.send("ticka");
@@ -289,9 +299,9 @@ mod tests {
     fn choose() {
         #[derive(Debug)]
         enum Message { Foo, Bar, Fubar }
-        let (s1, r1) = sync_channel(1);
-        let (s2, r2) = sync_channel(1);
-        let (s3, r3) = sync_channel(1);
+        let (s1, r1) = sync(1);
+        let (s2, r2) = sync(1);
+        let (s3, r3) = sync(1);
         thread::spawn(move || loop {
             thread::sleep_ms(50);
             s1.send(Message::Foo);
@@ -317,7 +327,7 @@ mod tests {
 
     #[test]
     fn mpmc() {
-        let (send, recv) = sync_channel(1);
+        let (send, recv) = sync(1);
         for i in 0..4 {
             let send = send.clone();
             thread::spawn(move || {

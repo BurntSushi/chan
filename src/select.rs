@@ -3,14 +3,19 @@ use std::collections::hash_map::{HashMap, Entry};
 use std::ops::Drop;
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
 
 use rand::{self, Rng};
+
+static NEXT_SELECT_ID: AtomicUsize = ATOMIC_USIZE_INIT;
+static NEXT_CHOOSE_ID: AtomicUsize = ATOMIC_USIZE_INIT;
 
 use {Receiver, Sender, ChannelId};
 
 pub struct Select<'c> {
+    id: u64,
     cond: Arc<Condvar>,
-    cond_mutex: Mutex<()>,
+    cond_mutex: Arc<Mutex<()>>,
     choices: HashMap<ChannelId, Choice<'c>>,
     ids: Option<Vec<ChannelId>>,
 }
@@ -57,8 +62,9 @@ impl<R: Receiver<Item=T>, T> SelectRecvHandle<R, T> {
 impl<'c> Select<'c> {
     pub fn new() -> Select<'c> {
         Select {
+            id: NEXT_SELECT_ID.fetch_add(1, Ordering::SeqCst) as u64,
             cond: Arc::new(Condvar::new()),
-            cond_mutex: Mutex::new(()),
+            cond_mutex: Arc::new(Mutex::new(())),
             choices: HashMap::new(),
             ids: None,
         }
@@ -78,41 +84,44 @@ impl<'c> Select<'c> {
     }
 
     fn maybe_try_select(&mut self, try: bool) -> Option<ChannelId> {
+        fn try_sync(
+            ids: &mut Option<Vec<ChannelId>>,
+            choices: &mut HashMap<ChannelId, Choice>,
+        ) -> Option<ChannelId> {
+            let mut ids = ids.as_mut().unwrap();
+            rand::thread_rng().shuffle(ids);
+            for key in ids {
+                if (choices.get_mut(key).unwrap().try)() {
+                    return Some(*key);
+                }
+            }
+            None
+        }
+
         self.ids = Some(self.choices.keys().cloned().collect());
-        let mut first = true;
+        if let Some(key) = try_sync(&mut self.ids, &mut self.choices) {
+            return Some(key);
+        }
+        if try {
+            return None;
+        }
+        // At this point, we've tried to pick one of the
+        // synchronization events without initiating a subscription,
+        // but nothing succeeded. Before we sit and wait, we need to
+        // tell all of our channels to notify us when something
+        // changes.
+        if !self.is_subscribed() {
+            for (_, choice) in &mut self.choices {
+                choice.subscribe();
+            }
+        }
+        let mut cond_lock = self.cond_mutex.lock().unwrap();
         loop {
-            if let Some(key) = self.try() {
+            if let Some(key) = try_sync(&mut self.ids, &mut self.choices) {
                 return Some(key);
             }
-            if first {
-                if try {
-                    return None;
-                }
-                // At this point, we've tried to pick one of the
-                // synchronization events without initiating a subscription,
-                // but nothing succeeded. Before we sit and wait, we need to
-                // tell all of our channels to notify us when something
-                // changes.
-                if !self.is_subscribed() {
-                    for (_, choice) in &mut self.choices {
-                        choice.subscribe();
-                    }
-                }
-            }
-            first = false;
-            let _ = self.cond.wait(self.cond_mutex.lock().unwrap()).unwrap();
+            cond_lock = self.cond.wait(cond_lock).unwrap();
         }
-    }
-
-    fn try(&mut self) -> Option<ChannelId> {
-        let mut ids = self.ids.as_mut().unwrap();
-        rand::thread_rng().shuffle(ids);
-        for key in ids {
-            if (self.choices.get_mut(key).unwrap().try)() {
-                return Some(*key);
-            }
-        }
-        None
     }
 
     pub fn send<'s: 'c, S, T>(
@@ -121,6 +130,7 @@ impl<'c> Select<'c> {
         val: T,
     ) -> SelectSendHandle<S>
     where S: Sender<Item=T> + Clone + 's, T: 'static {
+        let select_id = self.id;
         let mut val = Some(val);
         let chan2 = chan.clone();
         let boxed_try = Box::new(move || {
@@ -128,7 +138,7 @@ impl<'c> Select<'c> {
                 Some(v) => v,
                 None => return false,
             };
-            match chan2.try_send(v) {
+            match chan2.try_send_from(v, select_id) {
                 Ok(()) => true,
                 Err(val2) => { val = Some(val2); false }
             }
@@ -141,10 +151,12 @@ impl<'c> Select<'c> {
                 assert!(self.ids.is_none(),
                         "cannot add new channels after initial select");
                 let (chan2, chan3) = (chan.clone(), chan.clone());
+                let cond_mutex = self.cond_mutex.clone();
                 let condvar = self.cond.clone();
                 spot.insert(Choice {
                     subscribe: MaybeSubscribed::No(Box::new(move || {
-                        chan2.subscribe(condvar.clone())
+                        chan2.subscribe(
+                            select_id, cond_mutex.clone(), condvar.clone())
                     })),
                     unsubscribe: Box::new(move |key| chan3.unsubscribe(key)),
                     try: boxed_try,
@@ -159,11 +171,12 @@ impl<'c> Select<'c> {
         chan: R,
     ) -> SelectRecvHandle<R, T>
     where R: Receiver<Item=T> + Clone + 'r, T: 'static {
+        let select_id = self.id;
         let recv_val = Rc::new(RefCell::new(None));
         let recv_val2 = recv_val.clone();
         let chan2 = chan.clone();
         let boxed_try = Box::new(move || {
-            match chan2.try_recv() {
+            match chan2.try_recv_from(select_id) {
                 Ok(val) => { *recv_val2.borrow_mut() = Some(val); true }
                 Err(()) => false,
             }
@@ -176,10 +189,12 @@ impl<'c> Select<'c> {
                 assert!(self.ids.is_none(),
                         "cannot add new channels after initial select");
                 let (chan2, chan3) = (chan.clone(), chan.clone());
+                let cond_mutex = self.cond_mutex.clone();
                 let condvar = self.cond.clone();
                 spot.insert(Choice {
                     subscribe: MaybeSubscribed::No(Box::new(move || {
-                        chan2.subscribe(condvar.clone())
+                        chan2.subscribe(
+                            select_id, cond_mutex.clone(), condvar.clone())
                     })),
                     unsubscribe: Box::new(move |key| chan3.unsubscribe(key)),
                     try: boxed_try,
@@ -232,23 +247,26 @@ impl<'c> Drop for Select<'c> {
 }
 
 pub struct Choose<'a, T> {
+    id: u64,
     cond: Arc<Condvar>,
-    cond_mutex: Mutex<()>,
+    cond_mutex: Arc<Mutex<()>>,
     chans: Vec<(u64, Box<Receiver<Item=T> + 'a>)>,
 }
 
 impl<'a, T> Choose<'a, T> {
     pub fn new() -> Choose<'a, T> {
         Choose {
+            id: NEXT_CHOOSE_ID.fetch_add(1, Ordering::SeqCst) as u64,
             cond: Arc::new(Condvar::new()),
-            cond_mutex: Mutex::new(()),
+            cond_mutex: Arc::new(Mutex::new(())),
             chans: vec![],
         }
     }
 
     pub fn recv<C>(mut self, chan: C) -> Choose<'a, T>
             where C: Receiver<Item=T> + 'a {
-        let key = chan.subscribe(self.cond.clone());
+        let key = chan.subscribe(
+            self.id, self.cond_mutex.clone(), self.cond.clone());
         self.chans.push((key, Box::new(chan)));
         self
     }
@@ -267,7 +285,7 @@ impl<'a, T> Choose<'a, T> {
         let mut rng = rand::thread_rng();
         rng.shuffle(&mut self.chans);
         for &(_, ref chan) in &self.chans {
-            match chan.try_recv() {
+            match chan.try_recv_from(self.id) {
                 Ok(v) => return Ok(v),
                 Err(()) => continue,
             }

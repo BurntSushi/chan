@@ -1,6 +1,6 @@
 use std::fmt;
 use std::ops::Drop;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
 
 use notifier::Notifier;
@@ -17,7 +17,7 @@ use {Channel, Receiver, Sender, ChannelId};
 // and receiving halves of a channel.
 static NEXT_CHANNEL_ID: AtomicUsize = ATOMIC_USIZE_INIT;
 
-pub fn sync_channel<T>(size: usize) -> (SyncSender<T>, SyncReceiver<T>) {
+pub fn sync<T>(size: usize) -> (SyncSender<T>, SyncReceiver<T>) {
     let send = SyncChannel::new(size);
     let recv = send.clone();
     (send.into_sender(), recv.into_receiver())
@@ -190,8 +190,8 @@ impl<T> Channel for SyncSender<T> {
         ChannelId::sender(self.0.id())
     }
 
-    fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
-        self.0.notify().subscribe(condvar)
+    fn subscribe(&self, id: u64, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64 {
+        self.0.notify().subscribe(id, mutex, condvar)
     }
 
     fn unsubscribe(&self, key: u64) {
@@ -206,8 +206,8 @@ impl<T> Channel for SyncReceiver<T> {
         ChannelId::receiver(self.0.id())
     }
 
-    fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
-        self.0.notify().subscribe(condvar)
+    fn subscribe(&self, id: u64, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64 {
+        self.0.notify().subscribe(id, mutex, condvar)
     }
 
     fn unsubscribe(&self, key: u64) {
@@ -218,15 +218,26 @@ impl<T> Channel for SyncReceiver<T> {
 impl<T> Sender for SyncSender<T> {
     fn send(&self, val: T) {
         match *(self.0).0 {
-            SyncInner::Unbuffered(ref i) => i.send(val, false).ok().unwrap(),
-            SyncInner::Buffered(ref i) => i.send(val, false).ok().unwrap(),
+            SyncInner::Unbuffered(ref i) => {
+                i.send(val, false, None).ok().unwrap()
+            }
+            SyncInner::Buffered(ref i) => {
+                i.send(val, false, None).ok().unwrap()
+            }
         }
     }
 
     fn try_send(&self, val: T) -> Result<(), T> {
         match *(self.0).0 {
-            SyncInner::Unbuffered(ref i) => i.send(val, true),
-            SyncInner::Buffered(ref i) => i.send(val, true),
+            SyncInner::Unbuffered(ref i) => i.send(val, true, None),
+            SyncInner::Buffered(ref i) => i.send(val, true, None),
+        }
+    }
+
+    fn try_send_from(&self, val: T, id: u64) -> Result<(), T> {
+        match *(self.0).0 {
+            SyncInner::Unbuffered(ref i) => i.send(val, true, Some(id)),
+            SyncInner::Buffered(ref i) => i.send(val, true, Some(id)),
         }
     }
 }
@@ -234,21 +245,28 @@ impl<T> Sender for SyncSender<T> {
 impl<T> Receiver for SyncReceiver<T> {
     fn recv(&self) -> Option<T> {
         match *(self.0).0 {
-            SyncInner::Unbuffered(ref i) => i.recv(false).unwrap(),
-            SyncInner::Buffered(ref i) => i.recv(false).unwrap(),
+            SyncInner::Unbuffered(ref i) => i.recv(false, None).unwrap(),
+            SyncInner::Buffered(ref i) => i.recv(false, None).unwrap(),
         }
     }
 
     fn try_recv(&self) -> Result<Option<T>, ()> {
         match *(self.0).0 {
-            SyncInner::Unbuffered(ref i) => i.recv(true),
-            SyncInner::Buffered(ref i) => i.recv(true),
+            SyncInner::Unbuffered(ref i) => i.recv(true, None),
+            SyncInner::Buffered(ref i) => i.recv(true, None),
+        }
+    }
+
+    fn try_recv_from(&self, id: u64) -> Result<Option<T>, ()> {
+        match *(self.0).0 {
+            SyncInner::Unbuffered(ref i) => i.recv(true, Some(id)),
+            SyncInner::Buffered(ref i) => i.recv(true, Some(id)),
         }
     }
 }
 
 impl<T> Buffered<T> {
-    fn send(&self, val: T, try: bool) -> Result<(), T> {
+    fn send(&self, val: T, try: bool, from: Option<u64>) -> Result<(), T> {
         let mut ring = self.ring.lock().unwrap();
         while ring.len == self.cap {
             // We *need* two of these checks. This is here because if the
@@ -272,12 +290,15 @@ impl<T> Buffered<T> {
             panic!("cannot send on a closed channel");
         }
         ring.push(val);
+        drop(ring);
+        // println!("send - in - notify from: {:?} (try: {:?})", from, try);
+        self.notify.notify(from);
+        // println!("send - out - notify from: {:?} (try: {:?})", from, try);
         self.cond.notify_all();
-        self.notify.notify();
         Ok(())
     }
 
-    fn recv(&self, try: bool) -> Result<Option<T>, ()> {
+    fn recv(&self, try: bool, from: Option<u64>) -> Result<Option<T>, ()> {
         let mut ring = self.ring.lock().unwrap();
         while ring.len == 0 {
             if ring.closed {
@@ -289,16 +310,20 @@ impl<T> Buffered<T> {
             ring = self.cond.wait(ring).unwrap();
         }
         let val = ring.pop();
+        drop(ring);
+        // println!("recv - in - notify from: {:?} (try: {:?})", from, try);
+        self.notify.notify(from);
+        // println!("recv - out - notify from: {:?} (try: {:?})", from, try);
         self.cond.notify_all();
-        self.notify.notify();
         Ok(Some(val))
     }
 
     fn close(&self) {
         let mut ring = self.ring.lock().unwrap();
         ring.closed = true;
+        drop(ring);
         self.cond.notify_all();
-        self.notify.notify();
+        self.notify.notify(None);
     }
 }
 
@@ -334,8 +359,11 @@ impl<T: fmt::Debug> fmt::Debug for Buffered<T> {
 }
 
 impl<T> Unbuffered<T> {
-    fn send(&self, send_val: T, try: bool) -> Result<(), T> {
-        let _sender_lock = self.sender.lock().unwrap();
+    fn send(&self, send_val: T, try: bool, from: Option<u64>) -> Result<(), T> {
+        let _sender_lock = match try_lock(&self.sender, try) {
+            None => return Err(send_val),
+            Some(lock) => lock,
+        };
         // Since the sender lock has been acquired, that implies any
         // previous senders have completed, which implies that all
         // receivers that could make progress have made progress, and the
@@ -351,7 +379,9 @@ impl<T> Unbuffered<T> {
         }
         val.val = Some(send_val);
         self.cond.notify_all();
-        self.notify.notify();
+        drop(val);
+        self.notify.notify(from);
+        val = self.val.lock().unwrap();
         // At this point, any blocked receivers have woken up and will race
         // to access `val`. So we release the mutex but continue blocking
         // until a receiver has retrieved the value.
@@ -372,11 +402,11 @@ impl<T> Unbuffered<T> {
         // We notify after the lock has been released so that the next time
         // a sender tries to send, it will absolutely not be blocked by *this*
         // send.
-        self.notify.notify();
+        self.notify.notify(from);
         Ok(())
     }
 
-    fn recv(&self, try: bool) -> Result<Option<T>, ()> {
+    fn recv(&self, try: bool, from: Option<u64>) -> Result<Option<T>, ()> {
         let mut val = self.val.lock().unwrap();
         while val.val.is_none() {
             if val.closed {
@@ -388,25 +418,27 @@ impl<T> Unbuffered<T> {
             // We need to notify in case there are any blocking sends.
             // This will wake them up and cause them to try and send
             // something (after we release the `val` lock).
-            self.notify.notify();
+            self.notify.notify(from);
             self.cond.notify_all();
             val.nwaiting += 1;
             val = self.cond.wait(val).unwrap();
             val.nwaiting -= 1;
         }
         let recv_val = val.val.take().unwrap();
+        drop(val);
         self.cond.notify_all();
-        self.notify.notify();
+        self.notify.notify(from);
         Ok(Some(recv_val))
     }
 
     fn close(&self) {
         let mut val = self.val.lock().unwrap();
         val.closed = true;
+        drop(val);
         // If there are any blocked receivers, this will wake them up and
         // force them to return.
         self.cond.notify_all();
-        self.notify.notify();
+        self.notify.notify(None);
     }
 }
 
@@ -421,15 +453,27 @@ impl<T: fmt::Debug> fmt::Debug for Unbuffered<T> {
     }
 }
 
+fn try_lock<T>(mutex: &Mutex<T>, try: bool) -> Option<MutexGuard<T>> {
+    if !try {
+        Some(mutex.lock().unwrap())
+    } else {
+        match mutex.try_lock() {
+            Ok(g) => Some(g),
+            Err(TryLockError::Poisoned(_)) => panic!("poisoned mutex"),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use Sender;
-    use super::{SyncSender, sync_channel};
+    use super::{SyncSender, sync};
 
     #[test]
     #[should_panic]
     fn no_send_on_close() {
-        let (send, _) = sync_channel(1);
+        let (send, _) = sync(1);
         // cheat and get a sender without increasing sender count.
         // (this is only possible with private API!)
         let cheat_send = SyncSender(send.0.clone());
@@ -444,7 +488,7 @@ mod tests {
     #[should_panic]
     fn no_send_on_close_unbuffered() {
         // See comments in test `no_send_on_close` for explanation.
-        let (send, _) = sync_channel(0);
+        let (send, _) = sync(0);
         let cheat_send = SyncSender(send.0.clone());
         drop(send);
         ::std::mem::forget(cheat_send.clone());

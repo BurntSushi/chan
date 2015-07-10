@@ -1,3 +1,4 @@
+/*
 extern crate chan;
 extern crate hyper;
 
@@ -32,8 +33,8 @@ fn main() {
         "http://doc.rust-lang.org/std/macro.file!.html",
     ];
     let rpages = {
-        let (slinks, rlinks) = chan::sync_channel(0);
-        let (spages, rpages) = chan::sync_channel(0);
+        let (slinks, rlinks) = chan::sync(0);
+        let (spages, rpages) = chan::sync(0);
         thread::spawn(move || {
             for link in page_links {
                 slinks.send(link);
@@ -68,3 +69,6 @@ fn get_page(cli: &Client, link: &str) -> Result<String, Box<Error+Send+Sync>> {
     try!(resp.read_to_string(&mut page));
     Ok(page)
 }
+*/
+
+fn main() {}

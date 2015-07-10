@@ -9,7 +9,7 @@ use {Channel, Receiver, Sender, ChannelId};
 
 static NEXT_CHANNEL_ID: AtomicUsize = ATOMIC_USIZE_INIT;
 
-pub fn async_channel<T>() -> (AsyncSender<T>, AsyncReceiver<T>) {
+pub fn async<T>() -> (AsyncSender<T>, AsyncReceiver<T>) {
     let send = AsyncChannel::new();
     let recv = send.clone();
     (send.into_sender(), recv.into_receiver())
@@ -51,7 +51,16 @@ impl<T> AsyncChannel<T> {
         }))
     }
 
-    fn _recv(&self, try: bool) -> Result<Option<T>, ()> {
+    fn _send(&self, val: T, from: Option<u64>) -> Result<(), T> {
+        let mut queue = self.0.queue.lock().unwrap();
+        queue.queue.push_back(val);
+        drop(queue);
+        self.0.cond.notify_all();
+        self.0.notify.notify(from);
+        Ok(())
+    }
+
+    fn _recv(&self, try: bool, from: Option<u64>) -> Result<Option<T>, ()> {
         let mut queue = self.0.queue.lock().unwrap();
         while queue.queue.len() == 0 {
             if queue.closed {
@@ -63,8 +72,9 @@ impl<T> AsyncChannel<T> {
             queue = self.0.cond.wait(queue).unwrap();
         }
         let val = queue.queue.pop_front().unwrap();
+        drop(queue);
         self.0.cond.notify_all();
-        self.0.notify.notify();
+        self.0.notify.notify(from);
         Ok(Some(val))
     }
 
@@ -81,8 +91,9 @@ impl<T> AsyncChannel<T> {
     fn close(&self) {
         let mut queue = self.0.queue.lock().unwrap();
         queue.closed = true;
+        drop(queue);
         self.0.cond.notify_all();
-        self.0.notify.notify();
+        self.0.notify.notify(None);
     }
 }
 
@@ -123,8 +134,8 @@ impl<T> Channel for AsyncSender<T> {
         ChannelId::sender((self.0).0.id)
     }
 
-    fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
-        (self.0).0.notify.subscribe(condvar)
+    fn subscribe(&self, id: u64, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64 {
+        (self.0).0.notify.subscribe(id, mutex, condvar)
     }
 
     fn unsubscribe(&self, key: u64) {
@@ -139,8 +150,8 @@ impl<T> Channel for AsyncReceiver<T> {
         ChannelId::receiver((self.0).0.id)
     }
 
-    fn subscribe(&self, condvar: Arc<Condvar>) -> u64 {
-        (self.0).0.notify.subscribe(condvar)
+    fn subscribe(&self, id: u64, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64 {
+        (self.0).0.notify.subscribe(id, mutex, condvar)
     }
 
     fn unsubscribe(&self, key: u64) {
@@ -150,26 +161,29 @@ impl<T> Channel for AsyncReceiver<T> {
 
 impl<T> Sender for AsyncSender<T> {
     fn send(&self, val: T) {
-        self.try_send(val).ok().unwrap();
+        (self.0)._send(val, None).ok().unwrap();
     }
 
     fn try_send(&self, val: T) -> Result<(), T> {
-        let inner = &(self.0).0;
-        let mut queue = inner.queue.lock().unwrap();
-        queue.queue.push_back(val);
-        inner.cond.notify_all();
-        inner.notify.notify();
-        Ok(())
+        (self.0)._send(val, None)
+    }
+
+    fn try_send_from(&self, val: T, from: u64) -> Result<(), T> {
+        (self.0)._send(val, Some(from))
     }
 }
 
 impl<T> Receiver for AsyncReceiver<T> {
     fn recv(&self) -> Option<T> {
-        (self.0)._recv(false).unwrap()
+        (self.0)._recv(false, None).unwrap()
     }
 
     fn try_recv(&self) -> Result<Option<T>, ()> {
-        (self.0)._recv(true)
+        (self.0)._recv(true, None)
+    }
+
+    fn try_recv_from(&self, from: u64) -> Result<Option<T>, ()> {
+        (self.0)._recv(true, Some(from))
     }
 }
 

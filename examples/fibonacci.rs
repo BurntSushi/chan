@@ -23,8 +23,8 @@ fn fibonacci(c: SyncSender<u64>, quit: SyncReceiver<()>) {
 }
 
 fn main() {
-    let (csend, crecv) = chan::sync_channel(0);
-    let (qsend, qrecv) = chan::sync_channel(0);
+    let (csend, crecv) = chan::sync(0);
+    let (qsend, qrecv) = chan::sync(0);
     thread::spawn(move || {
         for _ in 0..10 {
             println!("{}", crecv.recv().unwrap());
