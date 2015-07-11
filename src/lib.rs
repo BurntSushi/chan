@@ -3,13 +3,15 @@ An implementation of a multi-producer, multi-consumer synchronous channel with
 a (possible empty) fixed size buffer.
 */
 
+#![allow(dead_code)]
+
 extern crate rand;
 
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 pub use async::{AsyncSender, AsyncReceiver, async};
 pub use sync::{SyncSender, SyncReceiver, sync};
-pub use select::{Choose, Select, SelectSendHandle, SelectRecvHandle};
+pub use select::{Select, SelectSendHandle, SelectRecvHandle};
 pub use wait_group::WaitGroup;
 
 mod async;
@@ -21,10 +23,12 @@ mod wait_group;
 
 pub trait Channel {
     type Item;
+    type GuardItem;
 
     fn id(&self) -> ChannelId;
     fn subscribe(&self, id: u64, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64;
     fn unsubscribe(&self, key: u64);
+    fn lock<'a>(&'a self) -> MutexGuard<'a, Self::GuardItem>;
 }
 
 pub trait Sender: Channel {
@@ -42,6 +46,7 @@ pub trait Receiver: Channel {
 
 impl<'a, T: Channel> Channel for &'a T {
     type Item = T::Item;
+    type GuardItem = T::GuardItem;
 
     fn id(&self) -> ChannelId { (*self).id() }
 
@@ -50,6 +55,10 @@ impl<'a, T: Channel> Channel for &'a T {
     }
 
     fn unsubscribe(&self, key: u64) { (*self).unsubscribe(key) }
+
+    fn lock<'b>(&'b self) -> MutexGuard<'b, T::GuardItem> {
+        (*self).lock()
+    }
 }
 
 impl<'a, T: Sender> Sender for &'a T {
@@ -174,7 +183,7 @@ mod tests {
     use std::thread;
 
     use super::{
-        Sender, Receiver, Choose, WaitGroup,
+        Sender, Receiver, WaitGroup,
         async, sync,
     };
 
@@ -256,17 +265,40 @@ mod tests {
         send.try_send(5).is_ok();
     }
 
+    /*
+    #[test]
+    fn select_manual() {
+        let (s1, r1) = sync(1);
+        let (s2, r2) = sync(1);
+        s1.send(1);
+        s2.send(2);
+
+        let mut sel = ::Select::new();
+        // let mut sel = &mut select;
+        let c1 = sel.recv(&r1);
+        let c2 = sel.recv(&r2);
+        let which = sel.select();
+        if which == c1.id() {
+            println!("r1");
+        } else if which == c2.id() {
+            println!("r2");
+        } else {
+            unreachable!();
+        }
+    }
+    */
+
     #[test]
     fn select() {
         let (sticka, rticka) = sync(1);
         let (stickb, rtickb) = sync(1);
         let (stickc, rtickc) = sync(1);
-        let (send, recv) = sync(0);
+        // let (send, recv) = sync(0);
         thread::spawn(move || {
             loop {
                 sticka.send("ticka");
                 thread::sleep_ms(100);
-                println!("RECV: {:?}", recv.recv());
+                // println!("RECV: {:?}", recv.recv());
             }
         });
         thread::spawn(move || {
@@ -286,7 +318,7 @@ mod tests {
                 rticka.recv() -> val => println!("{:?}", val),
                 rtickb.recv() -> val => println!("{:?}", val),
                 rtickc.recv() => stop = true,
-                send.send("fubar".to_owned()) => println!("SENT!"),
+                // send.send("fubar".to_owned()) => println!("SENT!"),
             }
             if stop {
                 break;
@@ -295,6 +327,7 @@ mod tests {
         println!("select done!");
     }
 
+    /*
     #[test]
     fn choose() {
         #[derive(Debug)]
@@ -324,6 +357,7 @@ mod tests {
         }
         println!("choose done!");
     }
+    */
 
     #[test]
     fn mpmc() {

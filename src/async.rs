@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
 
 use notifier::Notifier;
@@ -129,6 +129,7 @@ impl<T> Drop for AsyncReceiver<T> {
 
 impl<T> Channel for AsyncSender<T> {
     type Item = T;
+    type GuardItem = AsyncQueue<T>;
 
     fn id(&self) -> ChannelId {
         ChannelId::sender((self.0).0.id)
@@ -141,10 +142,17 @@ impl<T> Channel for AsyncSender<T> {
     fn unsubscribe(&self, key: u64) {
         (self.0).0.notify.unsubscribe(key)
     }
+
+    fn lock<'a>(&'a self) -> MutexGuard<'a, AsyncQueue<T>> {
+        (self.0).0.queue.lock().unwrap()
+        // let mut lock = Some((self.0).0.queue.lock().unwrap());
+        // Box::new(move || drop(lock.take().unwrap()))
+    }
 }
 
 impl<T> Channel for AsyncReceiver<T> {
     type Item = T;
+    type GuardItem = AsyncQueue<T>;
 
     fn id(&self) -> ChannelId {
         ChannelId::receiver((self.0).0.id)
@@ -156,6 +164,12 @@ impl<T> Channel for AsyncReceiver<T> {
 
     fn unsubscribe(&self, key: u64) {
         (self.0).0.notify.unsubscribe(key)
+    }
+
+    fn lock<'a>(&'a self) -> MutexGuard<'a, AsyncQueue<T>> {
+        (self.0).0.queue.lock().unwrap()
+        // let mut lock = Some((self.0).0.queue.lock().unwrap());
+        // Box::new(move || drop(lock.take().unwrap()))
     }
 }
 
