@@ -17,5 +17,8 @@ rand = "0.3"
 name = "test"
 path = "src/lib.rs"
 
+[features]
+nightly = []
+
 [dev-dependencies]
-hyper = "*"
+hyper = { version = "*" }
