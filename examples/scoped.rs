@@ -10,11 +10,15 @@ fn main() {
     // Channels implement `Sync`, which means any number of threads can use the
     // same channel value at the same time (without cloning/incrementing the
     // internal channel reference count).
+    //
+    // This also demonstrates that one can send borrowed references across
+    // channels.
+    let val = 5;
     let (s, r) = chan::sync(2);
     thread::scoped(|| {
-        s.send(5);
+        s.send(&val);
     }).join();
-    s.send(1);
+    s.send(&val);
     println!("{:?}", r.recv());
     println!("{:?}", r.recv());
 }
