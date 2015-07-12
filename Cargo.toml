@@ -17,5 +17,5 @@ rand = "0.3"
 name = "test"
 path = "src/lib.rs"
 
-# [dev-dependencies]
-# hyper = "*"
+[dev-dependencies]
+hyper = "*"

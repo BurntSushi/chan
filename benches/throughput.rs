@@ -9,10 +9,8 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 
-use chan::{Receiver, Sender};
 use rand::Rng;
 use test::Bencher;
-
 
 fn get_data() -> Vec<u8> {
     rand::thread_rng().gen_iter().take(1000).collect()
@@ -113,7 +111,7 @@ macro_rules! bench_select_no_init {
                 let (r0, r1, r2, r3) = (&rs[0], &rs[1], &rs[2], &rs[3]);
                 let mut done = &mut [false, false, false, false];
                 loop {
-                    select_chan! {
+                    chan_select! {
                         r0.recv() -> d => {
                             if let Some(d) = d {
                                 recv.push(d);
@@ -184,7 +182,7 @@ macro_rules! bench_select_with_init {
                 let mut done = &mut [false, false, false, false];
                 let mut sel = chan::Select::new();
                 loop {
-                    select_chan! {sel,
+                    chan_select! {sel,
                         r0.recv() -> d => {
                             if let Some(d) = d {
                                 recv.push(d);

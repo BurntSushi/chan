@@ -1,4 +1,3 @@
-/*
 extern crate chan;
 extern crate hyper;
 
@@ -7,7 +6,6 @@ use std::error::Error;
 use std::io::Read;
 use std::thread;
 
-use chan::{Receiver, Sender};
 use hyper::client::Client;
 
 fn main() {
@@ -69,6 +67,5 @@ fn get_page(cli: &Client, link: &str) -> Result<String, Box<Error+Send+Sync>> {
     try!(resp.read_to_string(&mut page));
     Ok(page)
 }
-*/
 
-fn main() {}
+// fn main() {}

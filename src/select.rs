@@ -1,33 +1,30 @@
 use std::cell::RefCell;
 use std::collections::hash_map::{HashMap, Entry};
-use std::ops::Drop;
 use std::rc::Rc;
-use std::sync::{Arc, Condvar, Mutex};
-use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use rand::{self, Rng};
 
-static NEXT_SELECT_ID: AtomicUsize = ATOMIC_USIZE_INIT;
-static NEXT_CHOOSE_ID: AtomicUsize = ATOMIC_USIZE_INIT;
+use {ChannelId, Receiver, Sender, Data};
 
-use {Receiver, Sender, ChannelId};
-
+#[doc(hidden)]
 pub struct Select<'c> {
-    id: u64,
     cond: Arc<Condvar>,
     cond_mutex: Arc<Mutex<()>>,
     choices: HashMap<ChannelId, Box<Choice + 'c>>,
     ids: Option<Vec<ChannelId>>,
 }
 
+#[doc(hidden)]
 #[derive(Debug)]
-pub struct SelectSendHandle<'s, S: 's> {
-    chan: &'s S,
+pub struct SelectSendHandle<'s, T: 's> {
+    chan: &'s Sender<T>,
 }
 
+#[doc(hidden)]
 #[derive(Debug)]
-pub struct SelectRecvHandle<'r, R: 'r, T> {
-    chan: &'r R,
+pub struct SelectRecvHandle<'r, T: 'r> {
+    chan: &'r Receiver<T>,
     val: Rc<RefCell<Option<Option<T>>>>,
 }
 
@@ -35,20 +32,21 @@ trait Choice {
     fn subscribe(&self, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64;
     fn unsubscribe(&self);
     fn subscription(&self) -> Option<u64>;
-    fn try(&self) -> bool;
-    fn lock<'a>(&'a self) -> Box<FnMut() + 'a>;
+    fn try(&mut self) -> bool;
+    fn lock(&mut self);
+    fn unlock(&mut self);
 }
 
-struct SendChoice<'s, S: 's, T> {
-    chan: &'s S,
-    select_id: u64,
+struct SendChoice<'s, T: 's> {
+    chan: &'s Sender<T>,
+    guard: Option<MutexGuard<'s, Data<T>>>,
     id: Option<u64>,
-    val: RefCell<Option<T>>,
+    val: Option<T>,
 }
 
-struct RecvChoice<'r, R: 'r, T> {
-    chan: &'r R,
-    select_id: u64,
+struct RecvChoice<'r, T: 'r> {
+    chan: &'r Receiver<T>,
+    guard: Option<MutexGuard<'r, Data<T>>>,
     id: Option<u64>,
     val: Rc<RefCell<Option<Option<T>>>>,
 }
@@ -56,7 +54,6 @@ struct RecvChoice<'r, R: 'r, T> {
 impl<'c> Select<'c> {
     pub fn new() -> Select<'c> {
         Select {
-            id: NEXT_SELECT_ID.fetch_add(1, Ordering::SeqCst) as u64,
             cond: Arc::new(Condvar::new()),
             cond_mutex: Arc::new(Mutex::new(())),
             choices: HashMap::new(),
@@ -77,23 +74,26 @@ impl<'c> Select<'c> {
         self.maybe_try_select(true)
     }
 
+    #[allow(unused_assignments)]
     fn maybe_try_select(&mut self, try: bool) -> Option<ChannelId> {
         fn try_sync<'c>(
             ids: &mut Option<Vec<ChannelId>>,
-            choices: &HashMap<ChannelId, Box<Choice + 'c>>,
+            choices: &mut HashMap<ChannelId, Box<Choice + 'c>>,
         ) -> Option<ChannelId> {
             let mut ids = ids.as_mut().unwrap();
             rand::thread_rng().shuffle(ids);
             for key in ids {
-                if choices.get(key).unwrap().try() {
+                if choices.get_mut(key).unwrap().try() {
                     return Some(*key);
                 }
             }
             None
         }
 
-        self.ids = Some(self.choices.keys().cloned().collect());
-        if let Some(key) = try_sync(&mut self.ids, &self.choices) {
+        if self.ids.is_none() {
+            self.ids = Some(self.choices.keys().cloned().collect());
+        }
+        if let Some(key) = try_sync(&mut self.ids, &mut self.choices) {
             return Some(key);
         }
         if try {
@@ -110,37 +110,35 @@ impl<'c> Select<'c> {
             }
         }
 
-        let mut chan_locks = Vec::with_capacity(self.choices.len());
-        for (_, choice) in &self.choices {
-            chan_locks.push(choice.lock());
+        for (_, choice) in &mut self.choices {
+            choice.lock();
         }
-        let mut cond_lock = self.cond_mutex.lock().unwrap();
+        let mut cond_lock;
         loop {
-            if let Some(key) = try_sync(&mut self.ids, &self.choices) {
+            if let Some(key) = try_sync(&mut self.ids, &mut self.choices) {
                 return Some(key);
             }
-            for mut unlock in chan_locks.into_iter().rev() {
-                unlock();
+            cond_lock = self.cond_mutex.lock().unwrap();
+            for (_, choice) in &mut self.choices {
+                choice.unlock();
             }
-            cond_lock = self.cond.wait(cond_lock).unwrap();
-            chan_locks = Vec::with_capacity(self.choices.len());
-            for (_, choice) in &self.choices {
-                chan_locks.push(choice.lock());
+            drop(self.cond.wait(cond_lock).unwrap());
+            for (_, choice) in &mut self.choices {
+                choice.lock();
             }
         }
     }
 
-    pub fn send<'s: 'c, S, T>(
+    pub fn send<'s: 'c, T: 'static>(
         &mut self,
-        chan: &'s S,
+        chan: &'s Sender<T>,
         val: T,
-    ) -> SelectSendHandle<'s, S>
-    where S: Sender<Item=T> + Clone + 's, T: 'static {
+    ) -> SelectSendHandle<'s, T> {
         let mut choice = SendChoice {
             chan: chan,
-            select_id: self.id,
+            guard: None,
             id: None,
-            val: RefCell::new(Some(val)),
+            val: Some(val),
         };
         match self.choices.entry(chan.id()) {
             Entry::Occupied(mut prev_choice) => {
@@ -156,14 +154,13 @@ impl<'c> Select<'c> {
         SelectSendHandle { chan: chan }
     }
 
-    pub fn recv<'r: 'c, R, T>(
+    pub fn recv<'r: 'c, T: 'static>(
         &mut self,
-        chan: &'r R,
-    ) -> SelectRecvHandle<'r, R, T>
-    where R: Receiver<Item=T> + Clone + 'r, T: 'static {
+        chan: &'r Receiver<T>,
+    ) -> SelectRecvHandle<'r, T> {
         let mut choice = RecvChoice {
             chan: chan,
-            select_id: self.id,
+            guard: None,
             id: None,
             val: Rc::new(RefCell::new(None)),
         };
@@ -191,14 +188,14 @@ impl<'c> Drop for Select<'c> {
     }
 }
 
-impl<'s, S: Sender<Item=T>, T> Choice for SendChoice<'s, S, T> {
+impl<'s, T> Choice for SendChoice<'s, T> {
     fn subscribe(&self, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64 {
-        self.chan.subscribe(self.select_id, mutex, condvar)
+        self.chan.inner().notify.subscribe(mutex, condvar)
     }
 
     fn unsubscribe(&self) {
         match self.id {
-            Some(id) => self.chan.unsubscribe(id),
+            Some(id) => self.chan.inner().notify.unsubscribe(id),
             None => {}
         }
     }
@@ -207,30 +204,43 @@ impl<'s, S: Sender<Item=T>, T> Choice for SendChoice<'s, S, T> {
         self.id
     }
 
-    fn try(&self) -> bool {
-        let v = match self.val.borrow_mut().take() {
+    fn try(&mut self) -> bool {
+        let v = match self.val.take() {
             Some(v) => v,
             None => return false,
         };
-        match self.chan.try_send_from(v, self.select_id) {
+        let try = match self.guard.take() {
+            None => self.chan.try_send(v),
+            Some(g) => {
+                let op = self.chan.send_op(g, true, v);
+                let (lock, result) = op.into_result_lock();
+                self.guard = Some(lock);
+                result
+            }
+        };
+        match try {
             Ok(()) => true,
-            Err(v) => { *self.val.borrow_mut() = Some(v); false }
+            Err(v) => { self.val = Some(v); false }
         }
     }
 
-    fn lock<'a>(&'a self) -> Box<FnMut() + 'a> {
-        self.chan.lock()
+    fn lock(&mut self) {
+        self.guard = Some(self.chan.inner().lock());
+    }
+
+    fn unlock(&mut self) {
+        self.guard.take();
     }
 }
 
-impl<'r, R: Receiver<Item=T>, T> Choice for RecvChoice<'r, R, T> {
+impl<'r, T> Choice for RecvChoice<'r, T> {
     fn subscribe(&self, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64 {
-        self.chan.subscribe(self.select_id, mutex, condvar)
+        self.chan.inner().notify.subscribe(mutex, condvar)
     }
 
     fn unsubscribe(&self) {
         match self.id {
-            Some(id) => self.chan.unsubscribe(id),
+            Some(id) => self.chan.inner().notify.unsubscribe(id),
             None => {}
         }
     }
@@ -239,25 +249,38 @@ impl<'r, R: Receiver<Item=T>, T> Choice for RecvChoice<'r, R, T> {
         self.id
     }
 
-    fn try(&self) -> bool {
-        match self.chan.try_recv_from(self.select_id) {
+    fn try(&mut self) -> bool {
+        let try = match self.guard.take() {
+            None => self.chan.try_recv(),
+            Some(g) => {
+                let op = self.chan.recv_op(g, true);
+                let (lock, result) = op.into_result_lock();
+                self.guard = Some(lock);
+                result
+            }
+        };
+        match try {
             Ok(v) => { *self.val.borrow_mut() = Some(v); true }
             Err(()) => false,
         }
     }
 
-    fn lock<'a>(&'a self) -> Box<FnMut() + 'a> {
-        self.chan.lock()
+    fn lock(&mut self) {
+        self.guard = Some(self.chan.inner().lock());
+    }
+
+    fn unlock(&mut self) {
+        self.guard.take();
     }
 }
 
-impl<'s, S: Sender> SelectSendHandle<'s, S> {
+impl<'s, T> SelectSendHandle<'s, T> {
     pub fn id(&self) -> ChannelId {
         self.chan.id()
     }
 }
 
-impl<'r, R: Receiver<Item=T>, T> SelectRecvHandle<'r, R, T> {
+impl<'r, T> SelectRecvHandle<'r, T> {
     pub fn id(&self) -> ChannelId {
         self.chan.id()
     }
@@ -267,61 +290,3 @@ impl<'r, R: Receiver<Item=T>, T> SelectRecvHandle<'r, R, T> {
         val
     }
 }
-
-/*
-pub struct Choose<'a, T> {
-    id: u64,
-    cond: Arc<Condvar>,
-    cond_mutex: Arc<Mutex<()>>,
-    chans: Vec<(u64, Box<Receiver<Item=T> + 'a>)>,
-}
-
-impl<'a, T> Choose<'a, T> {
-    pub fn new() -> Choose<'a, T> {
-        Choose {
-            id: NEXT_CHOOSE_ID.fetch_add(1, Ordering::SeqCst) as u64,
-            cond: Arc::new(Condvar::new()),
-            cond_mutex: Arc::new(Mutex::new(())),
-            chans: vec![],
-        }
-    }
-
-    pub fn recv<C>(mut self, chan: C) -> Choose<'a, T>
-            where C: Receiver<Item=T> + 'a {
-        let key = chan.subscribe(
-            self.id, self.cond_mutex.clone(), self.cond.clone());
-        self.chans.push((key, Box::new(chan)));
-        self
-    }
-
-    pub fn choose(&mut self) -> Option<T> {
-        loop {
-            match self.try_choose() {
-                Ok(v) => return v,
-                Err(()) => {}
-            }
-            let _ = self.cond.wait(self.cond_mutex.lock().unwrap()).unwrap();
-        }
-    }
-
-    pub fn try_choose(&mut self) -> Result<Option<T>, ()> {
-        let mut rng = rand::thread_rng();
-        rng.shuffle(&mut self.chans);
-        for &(_, ref chan) in &self.chans {
-            match chan.try_recv_from(self.id) {
-                Ok(v) => return Ok(v),
-                Err(()) => continue,
-            }
-        }
-        Err(())
-    }
-}
-
-impl<'a, T> Drop for Choose<'a, T> {
-    fn drop(&mut self) {
-        for &(key, ref chan) in &self.chans {
-            chan.unsubscribe(key);
-        }
-    }
-}
-*/

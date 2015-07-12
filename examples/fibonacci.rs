@@ -3,12 +3,12 @@ extern crate chan;
 
 use std::thread;
 
-use chan::{Receiver, Sender, SyncReceiver, SyncSender};
+use chan::{Receiver, Sender};
 
-fn fibonacci(c: SyncSender<u64>, quit: SyncReceiver<()>) {
+fn fibonacci(c: Sender<u64>, quit: Receiver<()>) {
     let (mut x, mut y) = (0, 1);
     loop {
-        select_chan! {
+        chan_select! {
             c.send(x) => {
                 let oldx = x;
                 x = y;

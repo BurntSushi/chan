@@ -13,8 +13,6 @@ extern crate chan;
 
 use std::thread;
 
-use chan::{Receiver, Sender};
-
 fn main() {
     let (s1, r1) = chan::sync(0);
     let (s2, r2) = chan::sync(0);
@@ -46,9 +44,9 @@ fn main() {
     };
     loop {
         let (r1b, r2b) = (&r1, &r2);
-        select_chan! {
+        chan_select! {
             default => {
-                select_chan! {
+                chan_select! {
                     r1b.recv() -> v1 => match v1 {
                         None => {}
                         Some(v1) => println!("r1: {:?}", v1),

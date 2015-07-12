@@ -26,7 +26,6 @@ struct Inner {
 }
 
 struct Subscription {
-    id: u64,
     mutex: Arc<Mutex<()>>,
     cond: Arc<Condvar>,
 }
@@ -39,12 +38,9 @@ impl Notifier {
         }))
     }
 
-    pub fn notify(&self, from: Option<u64>) {
+    pub fn notify(&self) {
         let notify = self.0.read().unwrap();
         for sub in notify.subscriptions.values() {
-            if Some(sub.id) == from {
-                continue;
-            }
             let _lock = sub.mutex.lock().unwrap();
             sub.cond.notify_all();
         }
@@ -52,7 +48,6 @@ impl Notifier {
 
     pub fn subscribe(
         &self,
-        from_id: u64,
         mutex: Arc<Mutex<()>>,
         condvar: Arc<Condvar>,
     ) -> u64 {
@@ -60,7 +55,6 @@ impl Notifier {
         let id = notify.next_id;
         notify.next_id = notify.next_id.checked_add(1).unwrap();
         notify.subscriptions.insert(id, Subscription {
-            id: from_id,
             mutex: mutex,
             cond: condvar,
         });

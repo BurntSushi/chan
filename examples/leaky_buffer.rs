@@ -5,7 +5,7 @@ extern crate chan;
 
 use std::thread;
 
-use chan::{Receiver, Sender, SyncReceiver, SyncSender};
+use chan::{Receiver, Sender};
 
 type Buffer = Vec<u8>;
 
@@ -18,10 +18,10 @@ fn main() {
     thread::sleep_ms(500);
 }
 
-fn client(free_list: SyncReceiver<Buffer>, server_chan: SyncSender<Buffer>) {
+fn client(free_list: Receiver<Buffer>, server_chan: Sender<Buffer>) {
     loop {
         let buf;
-        select_chan! {
+        chan_select! {
             default => buf = Vec::with_capacity(1024),
             free_list.recv() -> b => buf = b.unwrap(),
         }
@@ -29,10 +29,10 @@ fn client(free_list: SyncReceiver<Buffer>, server_chan: SyncSender<Buffer>) {
     }
 }
 
-fn server(free_list: SyncSender<Buffer>, server_chan: SyncReceiver<Buffer>) {
+fn server(free_list: Sender<Buffer>, server_chan: Receiver<Buffer>) {
     loop {
         let buf = server_chan.recv().unwrap();
-        select_chan! {
+        chan_select! {
             default => {},
             free_list.send(buf) => {},
         }
