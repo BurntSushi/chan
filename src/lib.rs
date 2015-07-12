@@ -7,6 +7,7 @@ extern crate rand;
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::ops::Drop;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
@@ -520,6 +521,34 @@ impl<T> Drop for Receiver<T> {
         self.inner().track.remove_receiver(|| ());
     }
 }
+
+impl<T> Hash for Sender<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id().hash(state);
+    }
+}
+
+impl<T> Hash for Receiver<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id().hash(state);
+    }
+}
+
+impl<T> PartialEq for Sender<T> {
+    fn eq(&self, other: &Sender<T>) -> bool {
+        self.id() == other.id()
+    }
+}
+
+
+impl<T> PartialEq for Receiver<T> {
+    fn eq(&self, other: &Receiver<T>) -> bool {
+        self.id() == other.id()
+    }
+}
+
+impl<T> Eq for Sender<T> {}
+impl<T> Eq for Receiver<T> {}
 
 impl<T: fmt::Debug> fmt::Debug for Inner<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
