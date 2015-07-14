@@ -116,6 +116,9 @@ impl<'c> Select<'c> {
         let mut cond_lock;
         loop {
             if let Some(key) = try_sync(&mut self.ids, &mut self.choices) {
+                for (_, choice) in &mut self.choices {
+                    choice.unlock();
+                }
                 return Some(key);
             }
             cond_lock = self.cond_mutex.lock().unwrap();
