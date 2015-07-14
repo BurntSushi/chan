@@ -11,6 +11,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Drop;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
+use std::thread;
 
 use notifier::Notifier;
 pub use select::{Select, SelectRecvHandle, SelectSendHandle};
@@ -42,6 +43,35 @@ pub fn async<T>() -> (Sender<T>, Receiver<T>) {
     let send = Channel::new(0, true);
     let recv = send.clone();
     (send.into_sender(), recv.into_receiver())
+}
+
+pub fn after_ms(duration: u32) -> Receiver<()> {
+    let (send, recv) = sync(0);
+    thread::spawn(move || {
+        thread::sleep_ms(duration);
+        send.send(());
+    });
+    recv
+}
+
+pub fn tick_ms(duration: u32) -> Receiver<Sender<()>> {
+    let (send, recv) = sync(0);
+    if duration == 0 {
+        // Leak the send channel so that it never gets closed and
+        // `recv` never synchronizes.
+        ::std::mem::forget(send);
+    } else {
+        thread::spawn(move || {
+            loop {
+                thread::sleep_ms(duration);
+                let (sdone, rdone) = sync(0);
+                send.send(sdone);
+                // Block until `sdone` gets closed by the caller.
+                rdone.recv();
+            }
+        });
+    }
+    recv
 }
 
 #[doc(hidden)]
