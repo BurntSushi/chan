@@ -149,7 +149,9 @@ fn main() {
         for _ in 0..10 {
             println!("{}", r.recv().unwrap());
         }
-        qs.send(());
+        // Dropping all sending channels causes the receive channel to
+        // immediately and always synchronize (because the channel is closed).
+        drop(qs);
     });
     fibonacci(s, qr);
 }
@@ -972,7 +974,6 @@ mod tests {
         send.try_send(5).is_ok();
     }
 
-    /*
     #[test]
     fn select_manual() {
         let (s1, r1) = sync(1);
@@ -981,7 +982,7 @@ mod tests {
         s2.send(2);
 
         let mut sel = ::Select::new();
-        // let mut sel = &mut select;
+        let mut sel = &mut sel;
         let c1 = sel.recv(&r1);
         let c2 = sel.recv(&r2);
         let which = sel.select();
@@ -993,7 +994,6 @@ mod tests {
             unreachable!();
         }
     }
-    */
 
     #[test]
     fn select() {

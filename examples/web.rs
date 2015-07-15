@@ -67,5 +67,3 @@ fn get_page(cli: &Client, link: &str) -> Result<String, Box<Error+Send+Sync>> {
     try!(resp.read_to_string(&mut page));
     Ok(page)
 }
-
-// fn main() {}
