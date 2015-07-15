@@ -43,14 +43,14 @@ fn main() {
             let spages = spages.clone();
             thread::spawn(move || {
                 let cli = Client::new();
-                for link in rlinks.iter() {
+                for link in rlinks {
                     spages.send((link, get_page(&cli, &link)));
                 }
             });
         }
         rpages
     };
-    for (link, page) in rpages.iter() {
+    for (link, page) in rpages {
         match page {
             Err(err) => println!("Could not fetch {}: {}", link, err),
             Ok(page) => println!("{}, {}", page.len(), link),

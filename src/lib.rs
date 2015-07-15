@@ -1,6 +1,216 @@
 /*!
-An implementation of a multi-producer, multi-consumer synchronous channel with
-a (possible empty) fixed size buffer.
+This crate provides an implementation of a multi-producer, multi-consumer
+channel. Channels come in three varieties:
+
+1. Asynchronous channels. Sends never block. Its buffer is only limited by the
+   available resources on the system.
+2. Synchronous buffered channels. Sends block when the buffer is full. The
+   buffer is depleted by receiving on the channel.
+3. Rendezvous channels (synchronous channels without a buffer). Sends block
+   until a receive has consumed the value sent. When a sender and receiver
+   synchronize, they are said to *rendezvous*.
+
+Asynchronous channels are created with `chan::async()`. Synchronous channels
+are created with `chan::sync(k)` where `k` is the buffer size. Rendezvous
+channels are created with `chan::sync(0)`.
+
+All channels are of the same type and are split into two types upon creation:
+a `Sender` and a `Receiver`. Additional senders and receivers can be created
+with reckless abandon by calling `clone`.
+
+When all senders are dropped, the channel is closed and no other sends are
+possible. In a channel with a buffer, receivers continue to consume values
+until the buffer is empty, at which point, a `None` value is always returned
+immediately.
+
+No special semantics are enforced when all receivers are dropped. Asynchronous
+sends will continue to work. Synchronous sends will block indefinitely when
+the buffer is full. A send on a rendezvous channel will also block
+indefinitely. (**NOTE**: This could be changed!)
+
+All channels satisfy *both* `Send` and `Sync` and can be freely mixed in
+`chan_select!`. Said differently, the synchronization semantics of a channel
+are encoded upon construction, but are otherwise indistinguishable to the
+type system.
+
+Values sent on channels are subject to the normal restrictions Rust has on
+values crossing thread boundaries. i.e., Values musts implement `Send` and/or
+`Sync`. (An `Rc<T>` *cannot* be sent on a channel, but a channel can be sent
+on a channel!)
+
+
+# Example: rendezvous channel
+
+A simple example demonstrating a rendezvous channel:
+
+```
+use std::thread;
+
+let (send, recv) = chan::sync(0);
+thread::spawn(move || send.send(5));
+assert_eq!(recv.recv(), Some(5)); // blocks until the previous send occurs
+```
+
+
+# Example: synchronous channel
+
+Similarly, an example demonstrating a synchronous channel:
+
+```
+let (send, recv) = chan::sync(1);
+send.send(5); // doesn't block because of the buffer
+assert_eq!(recv.recv(), Some(5));
+```
+
+
+# Example: multiple producers and multiple consumers
+
+An example demonstrating multiple consumers and multiple producers:
+
+```
+use std::thread;
+
+let r = {
+    let (s, r) = chan::sync(0);
+    for letter in vec!['a', 'b', 'c', 'd'] {
+        let s = s.clone();
+        thread::spawn(move || {
+            for _ in 0..10 {
+                s.send(letter);
+            }
+        });
+    }
+    // This extra lexical scope will drop the initial
+    // sender we created. Thus, the channel will be
+    // closed when all threads spawned above has completed.
+    r
+};
+
+// A wait group lets us synchronize the completion of multiple threads.
+let wg = chan::WaitGroup::new();
+for _ in 0..4 {
+    wg.add(1);
+    let wg = wg.clone();
+    let r = r.clone();
+    thread::spawn(move || {
+        for letter in r {
+            println!("Received letter: {}", letter);
+        }
+        wg.done();
+    });
+}
+
+// If this was the end of the process and we didn't call `wg.wait()`, then
+// the process might quit before all of the consumers were done.
+// `wg.wait()` will block until all `wg.done()` calls have finished.
+wg.wait();
+```
+
+
+# Example: Select on multiple channel sends/receives
+
+An example showing how to use `chan_select!` to synchronize on sends
+or receives.
+
+```
+#[macro_use]
+extern crate chan;
+
+use std::thread;
+
+// Emits the fibonacci sequence on the given channel until `quit` receives
+// a sentinel value.
+fn fibonacci(s: chan::Sender<u64>, quit: chan::Receiver<()>) {
+    let (mut x, mut y) = (0, 1);
+    loop {
+        // Select will block until at least one of `s.send` or `quit.recv`
+        // is ready to succeed. At which point, it will choose exactly one
+        // send/receive to synchronize.
+        chan_select! {
+            s.send(x) => {
+                let oldx = x;
+                x = y;
+                y = oldx + y;
+            },
+            quit.recv() => {
+                println!("quit");
+                return;
+            }
+        }
+    }
+}
+
+fn main() {
+    let (s, r) = chan::sync(0);
+    let (qs, qr) = chan::sync(0);
+    // Spawn a thread and ask for the first 10 numbers in the fibonacci
+    // sequence.
+    thread::spawn(move || {
+        for _ in 0..10 {
+            println!("{}", r.recv().unwrap());
+        }
+        qs.send(());
+    });
+    fibonacci(s, qr);
+}
+```
+
+
+# Example: non-blocking sends/receives
+
+This crate specifically does not expose methods like `try_send` or `try_recv`.
+Instead, you should prefer using `chan_select!` to perform a non-blocking
+send or receive. This can be done by telling select what to do when no
+synchronization events are available.
+
+```
+# #[macro_use] extern crate chan; fn main() {
+let (s, _) = chan::sync(0);
+chan_select! {
+    default => println!("Send failed."),
+    s.send("some data") => println!("Send succeeded."),
+}
+# }
+```
+
+When `chan_select!` first runs, it will check if `s.send(...)` can succeed
+*without blocking*. If so, `chan_select!` will permit the channels to
+rendezvous. However, if there is no `recv` read to accept the send, then
+`chan_select!` will immediate execute the `default` arm.
+
+Here are a few notes on non-blocking sends:
+
+* A send on a synchronous channel whose buffer is not full always qualifies
+  as a non-blocking.
+* Similarly, a send on an asynchronous channel is never blocking.
+* A receive on a synchronous channel with a non-zero buffer is non-blocking.
+* A receive on any closed channel is non-blocking.
+
+
+# Warnings
+
+The primary purpose of this crate is to provide a safe, concurrent abstraction.
+Notably, it is *not* a zero-cost abstraction. It is not even a near-zero-cost
+abstraction. Throughput on a channel is startlingly slow (see the benchmarks
+in this crate's repository). Therefore, the channels provided in this crate
+are most useful as a means to structure concurrent programs at a coarse level.
+
+If your requirements call for performant synchronization of data, `chan` is not
+the crate you're looking for.
+
+
+# Prior art
+
+The semantics encoded in the channels provided by this crate should mirror or
+closely mirror the semantics provided by channels in Go. This includes
+select statements! The major difference between concurrent programs written
+with `chan` and concurrent programs written with Go is that Go programs can
+benefit from being fast and loose with creating goroutines. In `chan`, each
+"goroutine" is just an OS thread.
+
+In terms of writing code, Go programs will feature explicit closing of
+channels. In `chan`, channels are closed **only** when all senders have been
+dropped.
 */
 
 extern crate rand;
@@ -101,6 +311,18 @@ pub struct Iter<T> {
 impl<T> Iterator for Iter<T> {
     type Item = T;
     fn next(&mut self) -> Option<T> { self.chan.recv() }
+}
+
+impl<T> IntoIterator for Receiver<T> {
+    type Item = T;
+    type IntoIter = Iter<T>;
+    fn into_iter(self) -> Iter<T> { Iter { chan: self } }
+}
+
+impl<'a, T> IntoIterator for &'a Receiver<T> {
+    type Item = T;
+    type IntoIter = Iter<T>;
+    fn into_iter(self) -> Iter<T> { self.iter() }
 }
 
 #[derive(Debug)]
@@ -818,7 +1040,7 @@ mod tests {
             let wg_done = wg_done.clone();
             let recv = recv.clone();
             thread::spawn(move || {
-                for (sent_from, work) in recv.iter() {
+                for (sent_from, work) in recv {
                     println!("sent from {} to {}, work: {}",
                              sent_from, i, work);
                 }
