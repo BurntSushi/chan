@@ -34,7 +34,7 @@ are encoded upon construction, but are otherwise indistinguishable to the
 type system.
 
 Values sent on channels are subject to the normal restrictions Rust has on
-values crossing thread boundaries. i.e., Values musts implement `Send` and/or
+values crossing thread boundaries. i.e., Values must implement `Send` and/or
 `Sync`. (An `Rc<T>` *cannot* be sent on a channel, but a channel can be sent
 on a channel!)
 
