@@ -212,12 +212,13 @@ In terms of writing code:
 
 1. Go programs will feature explicit closing of channels. In `chan`, channels
    are closed **only** when all senders have been dropped.
-2. Since there is no such thing as a "nil" channel, the semantics Go has for
-   nil channels (both sends and receives block indefinitely) do not exist in
-   `chan`.
+2. Since there is no such thing as a "nil" channel in `chan`, the semantics Go
+   has for nil channels (both sends and receives block indefinitely) do not
+   exist in `chan`.
 3. `chan` does not expose `len` or `cap` methods. (For no reason other than
    to start with a totally minimal API. In particular, calling `len` or `cap`
-   on a channel is often The Wrong Thing.)
+   on a channel is often The Wrong Thing. But not always. So this restriction
+   will probably be lifted.)
 4. In `chan`, all channels are either senders or receivers. There is no
    "bidirectional" channel. This is manifest in how channel memory is managed:
    channels are closed when all senders are dropped.
