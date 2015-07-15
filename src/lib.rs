@@ -175,7 +175,7 @@ chan_select! {
 
 When `chan_select!` first runs, it will check if `s.send(...)` can succeed
 *without blocking*. If so, `chan_select!` will permit the channels to
-rendezvous. However, if there is no `recv` read to accept the send, then
+rendezvous. However, if there is no `recv` call to accept the send, then
 `chan_select!` will immediate execute the `default` arm.
 
 Here are a few notes on non-blocking sends:
