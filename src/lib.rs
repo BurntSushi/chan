@@ -176,14 +176,14 @@ chan_select! {
 When `chan_select!` first runs, it will check if `s.send(...)` can succeed
 *without blocking*. If so, `chan_select!` will permit the channels to
 rendezvous. However, if there is no `recv` call to accept the send, then
-`chan_select!` will immediate execute the `default` arm.
+`chan_select!` will immediately execute the `default` arm.
 
 Here are a few notes on non-blocking sends:
 
 * A send on a synchronous channel whose buffer is not full always qualifies
-  as a non-blocking.
-* Similarly, a send on an asynchronous channel is never blocking.
-* A receive on a synchronous channel with a non-zero buffer is non-blocking.
+  as non-blocking.
+* Similarly, a send on an asynchronous channel is always non-blocking.
+* A receive on a synchronous channel with a non-empty buffer is non-blocking.
 * A receive on any closed channel is non-blocking.
 
 
@@ -191,7 +191,7 @@ Here are a few notes on non-blocking sends:
 
 The primary purpose of this crate is to provide a safe, concurrent abstraction.
 Notably, it is *not* a zero-cost abstraction. It is not even a near-zero-cost
-abstraction. Throughput on a channel is startlingly slow (see the benchmarks
+abstraction. Throughput on a channel is startlingly low (see the benchmarks
 in this crate's repository). Therefore, the channels provided in this crate
 are most useful as a means to structure concurrent programs at a coarse level.
 
@@ -208,9 +208,19 @@ with `chan` and concurrent programs written with Go is that Go programs can
 benefit from being fast and loose with creating goroutines. In `chan`, each
 "goroutine" is just an OS thread.
 
-In terms of writing code, Go programs will feature explicit closing of
-channels. In `chan`, channels are closed **only** when all senders have been
-dropped.
+In terms of writing code:
+
+1. Go programs will feature explicit closing of channels. In `chan`, channels
+   are closed **only** when all senders have been dropped.
+2. Since there is no such thing as a "nil" channel, the semantics Go has for
+   nil channels (both sends and receives block indefinitely) do not exist in
+   `chan`.
+3. `chan` does not expose `len` or `cap` methods. (For no reason other than
+   to start with a totally minimal API. In particular, calling `len` or `cap`
+   on a channel is often The Wrong Thing.)
+4. In `chan`, all channels are either senders or receivers. There is no
+   "bidirectional" channel. This is manifest in how channel memory is managed:
+   channels are closed when all senders are dropped.
 */
 
 extern crate rand;
