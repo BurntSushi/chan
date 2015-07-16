@@ -14,9 +14,9 @@ Asynchronous channels are created with `chan::async()`. Synchronous channels
 are created with `chan::sync(k)` where `k` is the buffer size. Rendezvous
 channels are created with `chan::sync(0)`.
 
-All channels are of the same type and are split into two types upon creation:
-a `Sender` and a `Receiver`. Additional senders and receivers can be created
-with reckless abandon by calling `clone`.
+all channels are split into the same two types upon creation: a `Sender` and
+a `Receiver`. Additional senders and receivers can be created with reckless
+abandon by calling `clone`.
 
 When all senders are dropped, the channel is closed and no other sends are
 possible. In a channel with a buffer, receivers continue to consume values
@@ -180,16 +180,179 @@ When `chan_select!` first runs, it will check if `s.send(...)` can succeed
 rendezvous. However, if there is no `recv` call to accept the send, then
 `chan_select!` will immediately execute the `default` arm.
 
-Here are a few notes on non-blocking sends:
 
-* A send on a synchronous channel whose buffer is not full always qualifies
-  as non-blocking.
-* Similarly, a send on an asynchronous channel is always non-blocking.
-* A receive on a synchronous channel with a non-empty buffer is non-blocking.
-* A receive on any closed channel is non-blocking.
+# Example: the sentinel channel idiom
+
+When writing concurrent programs with `chan`, you will often find that you need
+to somehow "wait" until some operation is done. For example, let's say you want
+to run a function in a separate thread, but wait until it completes. Here's
+one way to do it:
+
+```rust
+use std::thread;
+
+fn do_work(done: chan::Sender<()>) {
+    // do something
+
+    // signal that we're done.
+    done.send(());
+}
+
+fn main() {
+    let (sdone, rdone) = chan::sync(0);
+    thread::spawn(move || do_work(sdone));
+    // block until work is done, and then quit the program.
+    rdone.recv();
+}
+```
+
+In effect, we've created a new channel that sends unit values. When we're
+done doing work, we send a unit value and `main` waits for it to be delivered.
+
+Another way of achieving the same thing is to simply close the channel. Once
+the channel is closed, any previously blocked receive operations become
+immediately unblocked. What's even cooler is that channels are closed
+automatically when all senders are dropped. So the new program looks something
+like this:
+
+```rust
+use std::thread;
+
+fn do_work(_done: chan::Sender<()>) {
+    // do something
+}
+
+fn main() {
+    let (sdone, rdone) = chan::sync(0);
+    thread::spawn(move || do_work(sdone));
+    // block until work is done, and then quit the program.
+    rdone.recv();
+}
+```
+
+We no longer need to explicitly do anything with the `done` channel. We give
+`do_work` ownership of the channel, but as soon as the function stops
+executing, `done` is dropped, the channel is closed and `rdone.recv()`
+unblocks.
 
 
-# Warnings
+# Example: I want more!
+
+There are some examples in this crate's repository:
+https://github.com/BurntSushi/chan/tree/master/examples
+
+Here is a nice example using the `chan-signal` crate to read lines from
+stdin while gracefully quitting after receiving a `INT` or `TERM`
+signal:
+https://github.com/BurntSushi/chan-signal/blob/master/examples/read_names.rs
+
+A non-trivial program for periodically sending email with the output of
+running a command: https://github.com/BurntSushi/rust-cmail (The source is
+commented more heavily than normal.)
+
+
+# When are channel operations non-blocking?
+
+Non-blocking in this context means "a send/recv operation can synchronize
+immediately." (Under the hood, a mutex may still be acquired, which could
+block.)
+
+The following is a list of all cases where a channel operation is considered
+non-blocking:
+
+* A send on a synchronous channel whose buffer is not full.
+* A receive on a synchronous channel with a non-empty buffer.
+* A send on an asynchronous channel.
+* A rendezvous send or recv when a corresponding recv or send operation is
+already blocked, respectively.
+* A receive on any closed channel.
+
+Non-blocking semantics are important because they affect the behavior of
+`chan_select!`. In particular, a `chan_select!` with a `default` arm will
+execute the `default` case if and only if all other operations are blocked.
+
+
+# Which channel type should I use?
+
+[From Ken Kahn](http://www.eros-os.org/pipermail/e-lang/2003-January/008183.html):
+
+> About 25 years ago I went to dinner with Carl Hewitt and Robin Milner (of
+> CSS and pi calculus fame) and they were arguing about synchronous vs.
+> asynchronous communication primitives. Carl used the post office metaphor
+> while Robin used the telephone. Both quickly admitted that one can implement
+> one in the other.
+
+With three channel types to choose from, it may not always be clear which one
+you should use. In fact, there has been a long debate over which are better.
+Here are some rough guidelines:
+
+* Historically, asynchronous channels have been associated with the actor
+model, which means they're a little out of place in a library inspired by
+communicating sequential processes. Nevertheless, an unconstrained buffer can
+be occasionally useful.
+* Synchronous channels are useful because their stricter synchronization
+semantics can make it easier to reason about the flow of your program. In
+particular, with a rendezvous channel, one knows that a `send` unblocks only
+when a corresponding `recv` consumes the sent value. This makes it *feel*
+an awful lot like a function call!
+
+
+# Warning: leaks
+
+Channels can be leaked! In particular, if all receivers have been dropped,
+then any future sends will block. Usually this is indicative of a bug in your
+program.
+
+For example, consider a "generator" style pattern where a thread produces
+values on a channel and another thread consumes in an iterator.
+
+```no_run
+use std::thread;
+
+let (s, r) = chan::sync(0);
+
+thread::spawn(move || {
+    for val in r {
+        if val >= 2 {
+            break;
+        }
+    }
+});
+
+s.send(1);
+s.send(2);
+// This will deadlock because the loop in the thread
+// above quits after receiving `2`.
+s.send(3);
+```
+
+If the iterator loop quits early, the channel's buffer could fill up, which
+will indefinitely block all future send operations.
+
+(These leaks/deadlocks are detectable in most circumstances, and a `send`
+operation could be made to wake up and either return an error or panic. The
+semantics here are still experimental.)
+
+
+# Warning: more leaks
+
+It will always be possible to leak a channel in safe code regardless of the
+channel's semantics. For example:
+
+```no_run
+use std::mem::forget;
+
+let (s, r) = chan::sync::<()>(0);
+forget(s);
+// Blocks forever because the channel is never closed.
+r.recv();
+```
+
+In this case, it is impossible for the channel to close because the internal
+reference count will never reach `0`.
+
+
+# Warning: performance
 
 The primary purpose of this crate is to provide a safe, concurrent abstraction.
 Notably, it is *not* a zero-cost abstraction. It is not even a near-zero-cost
@@ -224,7 +387,14 @@ In terms of writing code:
 4. In `chan`, all channels are either senders or receivers. There is no
    "bidirectional" channel. This is manifest in how channel memory is managed:
    channels are closed when all senders are dropped.
+
+Of course, Go is not the origin of these ideas, but it has been the
+strongest influence on the design of this library, and at least one of its
+authors has done substantial research on the integration of CSP and programming
+languages.
 */
+
+#![deny(missing_docs)]
 
 extern crate rand;
 
@@ -256,27 +426,169 @@ mod select;
 mod tracker;
 mod wait_group;
 
+/// Create a synchronous channel with a possibly empty buffer.
+///
+/// When the `size` is zero, the buffer is empty and the channel becomes a
+/// rendezvous channel. A rendezvous channel blocks send operations until
+/// a corresponding receive operation consumes the sent value.
+///
+/// When the `size` is non-zero, the send operations will only block when the
+/// buffer is full. Send operations only unblock when a receive operation
+/// removes an element from the buffer.
+///
+/// Values are guaranteed to be received in the same order that they are sent.
+///
+/// The send and receive values returned can be cloned arbitrarily (i.e.,
+/// multi-producer/multi-consumer) and moved to other threads.
+///
+/// When all senders are dropped, the channel is closed automatically. No
+/// more values may be sent on a closed channel. Once a channel is closed and
+/// the buffer is empty, all receive operations return `None` immediately.
+/// (If a channel is closed and there are still values in the buffer, then
+/// receive operations will retrieve those first.)
+///
+/// When all receivers are dropped, no special action is taken. When the buffer
+/// is full, all subsequent send operations will block indefinitely.
+///
+/// # Examples
+///
+/// An example of a rendezvous channel:
+///
+/// ```
+/// use std::thread;
+///
+/// let (send, recv) = chan::sync(0);
+/// thread::spawn(move || send.send(5));
+/// assert_eq!(recv.recv(), Some(5)); // blocks until the previous send occurs
+/// ```
+///
+/// An example of a synchronous buffered channel:
+///
+/// ```
+/// let (send, recv) = chan::sync(1);
+///
+/// send.send(5); // doesn't block because of the buffer
+/// assert_eq!(recv.recv(), Some(5));
+///
+/// drop(send); // closes the channel
+/// assert_eq!(recv.recv(), None);
+/// ```
 pub fn sync<T>(size: usize) -> (Sender<T>, Receiver<T>) {
     let send = Channel::new(size, false);
     let recv = send.clone();
     (send.into_sender(), recv.into_receiver())
 }
 
+/// Create an asynchronous channel with an unbounded buffer.
+///
+/// Since the buffer is unbounded, send operations always succeed immediately.
+///
+/// Receive operations succeed only when there is at least one value in the
+/// buffer.
+///
+/// Values are guaranteed to be received in the same order that they are sent.
+///
+/// The send and receive values returned can be cloned arbitrarily (i.e.,
+/// multi-producer/multi-consumer) and moved to other threads.
+///
+/// When all senders are dropped, the channel is closed automatically. No
+/// more values may be sent on a closed channel. Once a channel is closed and
+/// the buffer is empty, all receive operations return `None` immediately.
+/// (If a channel is closed and there are still values in the buffer, then
+/// receive operations will retrieve those first.)
+///
+/// When all receivers are dropped, no special action is taken. When the buffer
+/// is full, all subsequent send operations will block indefinitely.
+///
+/// # Example
+///
+/// Asynchronous channels are nice when you just want to enqueue a bunch
+/// of values up front:
+///
+/// ```
+/// let (s, r) = chan::async();
+///
+/// for i in 0..10 {
+///     s.send(i);
+/// }
+///
+/// drop(s); // closing the channel lets the iterator stop
+/// let numbers: Vec<i32> = r.iter().collect();
+/// assert_eq!(numbers, (0..10).collect::<Vec<i32>>());
+/// ```
+///
+/// (Others should help me come up with more compelling examples of
+/// asynchronous channels.)
 pub fn async<T>() -> (Sender<T>, Receiver<T>) {
     let send = Channel::new(0, true);
     let recv = send.clone();
     (send.into_sender(), recv.into_receiver())
 }
 
+/// Creates a new rendezvous channel that is dropped after a timeout.
+///
+/// `duration` is specified in milliseconds.
+///
+/// When the channel is dropped, any receive operation on the returned channel
+/// will be unblocked.
+///
+/// N.B. This will eventually be deprecated when we get a proper duration type.
+///
+/// # Example
+///
+/// ```
+/// let wait = chan::after_ms(1000);
+/// // Unblocks after 1 second.
+/// wait.recv();
+/// ```
 pub fn after_ms(duration: u32) -> Receiver<()> {
     let (send, recv) = sync(0);
     thread::spawn(move || {
         thread::sleep_ms(duration);
-        send.send(());
+        drop(send);
     });
     recv
 }
 
+/// Creates a new rendezvous channel that is "ticked" every duration.
+///
+/// `duration` is specified in milliseconds.
+///
+/// When `duration` is `0`, no ticks are ever sent.
+///
+/// When `duration` is non-zero, then a new channel is created and sent at
+/// every duration. When the sent channel is dropped, the timer is reset
+/// and the process repeats after the duration.
+///
+/// This is especially convenient because it keeps the ticking in sync with
+/// the code that uses it. Namely, the ticks won't "build up."
+///
+/// N.B. There is no way to reclaim the resources used by this function.
+/// If you stop receiving on the channel returned, then the thread spawned by
+/// `tick_ms` will block indefinitely.
+///
+/// # Examples
+///
+/// This is most useful when used in `chan_select!` because the received
+/// sentinel channel gets dropped only after the correspond arm has
+/// executed. At which point, the ticker is reset and waits to tick until
+/// `duration` milliseconds lapses *after* the `chan_select!` arm is executed.
+///
+/// ```
+/// # #[macro_use] extern crate chan; fn main() {
+/// use std::thread;
+///
+/// let tick = chan::tick_ms(100);
+/// let boom = chan::after_ms(500);
+/// loop {
+///     chan_select! {
+///         default => { println!("   ."); thread::sleep_ms(50); },
+///         tick.recv() => println!("tick."),
+///         boom.recv() => { println!("BOOM!"); return; },
+///     }
+/// }
+/// # }
+/// ```
 pub fn tick_ms(duration: u32) -> Receiver<Sender<()>> {
     let (send, recv) = sync(0);
     if duration == 0 {
@@ -297,6 +609,10 @@ pub fn tick_ms(duration: u32) -> Receiver<Sender<()>> {
     recv
 }
 
+/// A value that uniquely identifies one half of a channel.
+///
+/// For any `s: Sender<T>`, `s.id() == s.clone().id()`. Similarly for
+/// any `r: Receiver<T>`.
 #[doc(hidden)]
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ChannelId(ChannelKey);
@@ -317,6 +633,7 @@ impl ChannelId {
     }
 }
 
+/// An iterator over values received in a channel.
 pub struct Iter<T> {
     chan: Receiver<T>,
 }
@@ -338,46 +655,103 @@ impl<'a, T> IntoIterator for &'a Receiver<T> {
     fn into_iter(self) -> Iter<T> { self.iter() }
 }
 
+/// The sending half of a channel.
+///
+/// Senders can be cloned any number of times and sent to other threads.
+///
+/// Senders also implement `Sync`, which means they can be shared among threads
+/// without cloning if the channels can be proven to outlive the execution
+/// of the threads.
+///
+/// When all sending halves of a channel are dropped, the channel is closed
+/// automatically. When a channel is closed, no new values can be sent on the
+/// channel. Also, all receive operations either return any values left in the
+/// buffer or return immediately with `None`.
 #[derive(Debug)]
 pub struct Sender<T>(Channel<T>);
 
+/// The receiving half of a channel.
+///
+/// Receivers can be cloned any number of times and sent to other threads.
+///
+/// Receivers also implement `Sync`, which means they can be shared among
+/// threads without cloning if the channels can be proven to outlive the
+/// execution of the threads.
+///
+/// When all receiving halves of a channel are dropped, no special action is
+/// taken. If the buffer in the channel is full, all sends will block
+/// indefinitely.
 #[derive(Debug)]
 pub struct Receiver<T>(Channel<T>);
 
+/// All senders and receivers are just newtypes around a more base channel.
+///
+/// i.e., All senders and receivers have direct access to any underlying
+/// buffer.
 #[derive(Debug)]
 struct Channel<T>(Arc<Inner<T>>);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChannelType {
     Async,
-    Unbuffered,
+    Rendezvous,
     Buffered,
 }
 
 struct Inner<T> {
+    /// An auto-incrementing id.
     id: u64,
+    /// Manages subscriptions to channels (e.g., from a `chan_select!`).
     notify: Notifier,
+    /// Tracks reference counts of senders and receivers.
     track: Tracker,
+    /// A condition variable on the contents of `data`.
     cond: Condvar,
+    /// The capacity of a synchronous buffer. This corresponds to the number
+    /// of elements allowed in the buffer before send operations block.
+    ///
+    /// For asynchronous and rendezvous channels, this is always 0.
     cap: usize,
+    /// The type of the channel.
     ty: ChannelType,
+    /// Synchronized data in the channel. e.g., the queued values.
     data: Mutex<Data<T>>,
 }
 
 #[derive(Debug)]
 struct Data<T> {
+    /// Whether the channel is closed or not. Once set to `true` it can never
+    /// be changed.
     closed: bool,
+    /// The number of senders waiting. (Currently only used in rendezvous
+    /// channels.)
     waiting_send: usize,
+    /// The number of receivers waiting. (Currently only used in rendezvous
+    /// channels.)
     waiting_recv: usize,
+    /// The actual data stored by the user.
     user: UserData<T>,
 }
 
 #[derive(Debug)]
 enum UserData<T> {
+    /// Used for rendezvous channels. We only need to ever store one value.
     One(Option<T>),
+    /// A ring buffer for synchronous channels.
+    /// There's definitely a more efficient representation, but I don't think
+    /// we really care.
     Ring { queue: Vec<Option<T>>, pos: usize, len: usize },
+    /// An unbounded queue for asynchronous channels.
     Queue(VecDeque<T>),
 }
+
+// The SendOp and RecvOp types unify the return values of all channel
+// operations. Their primary purpose is to permit the caller to retrieve the
+// channel's lock after the channel operation is done without the lock ever
+// being released. (This is critical functionality for `Select`.)
+//
+// N.B. The `WouldBlock` variants are only constructed if a non-blocking
+// operation is used (i.e., try_send or try_recv).
 
 struct SendOp<'a, T: 'a> {
     lock: MutexGuard<'a, Data<T>>,
@@ -404,6 +778,20 @@ enum RecvOpKind<T> {
 }
 
 impl<T> Sender<T> {
+    /// Send a value on this channel.
+    ///
+    /// If this is an asnychronous channel, `send` never blocks.
+    ///
+    /// If this is a synchronous channel, `send` only blocks when the buffer
+    /// is full.
+    ///
+    /// If this is a rendezvous channel, `send` blocks until a corresponding
+    /// `recv` retrieves `val`.
+    ///
+    /// Values are guaranteed to be received in the same order that they
+    /// are sent.
+    ///
+    /// This operation will never `panic!` but it can deadlock.
     pub fn send(&self, val: T) {
         self.send_op(self.inner().lock(), false, val).unwrap()
     }
@@ -420,8 +808,8 @@ impl<T> Sender<T> {
     ) -> SendOp<'a, T> {
         match self.inner().ty {
             ChannelType::Async => self.inner().async_send(data, val),
-            ChannelType::Unbuffered => {
-                self.inner().unbuffered_send(data, try, val)
+            ChannelType::Rendezvous => {
+                self.inner().rendezvous_send(data, try, val)
             }
             ChannelType::Buffered => {
                 self.inner().buffered_send(data, try, val)
@@ -439,6 +827,27 @@ impl<T> Sender<T> {
 }
 
 impl<T> Receiver<T> {
+    /// Receive a value on this channel.
+    ///
+    /// If this is an asnychronous channel, `recv` only blocks when the
+    /// buffer is empty.
+    ///
+    /// If this is a synchronous channel, `recv` only blocks when the buffer
+    /// is empty.
+    ///
+    /// If this is a rendezvous channel, `recv` blocks until a corresponding
+    /// `send` sends a value.
+    ///
+    /// For all channels, if the channel is closed and the buffer is empty,
+    /// then `recv` always and immediately returns `None`. (If the buffer is
+    /// non-empty on a closed channel, then values from the buffer are
+    /// returned.)
+    ///
+    /// Values are guaranteed to be received in the same order that they
+    /// are sent.
+    ///
+    /// This operation will never `panic!` but it can deadlock if the channel
+    /// is never closed.
     pub fn recv(&self) -> Option<T> {
         self.recv_op(self.inner().lock(), false).unwrap()
     }
@@ -452,13 +861,13 @@ impl<T> Receiver<T> {
         data: MutexGuard<'a, Data<T>>,
         try: bool,
     ) -> RecvOp<'a, T> {
-        match self.inner().ty {
-            ChannelType::Async => self.inner().async_recv(data, try),
-            ChannelType::Unbuffered => self.inner().unbuffered_recv(data, try),
-            ChannelType::Buffered => self.inner().buffered_recv(data, try),
-        }
+        self.inner().recv(data, try)
     }
 
+    /// Return an iterator for receiving values on this channel.
+    ///
+    /// This iterator yields values (blocking if necessary) until the channel
+    /// is closed.
     pub fn iter(&self) -> Iter<T> { Iter { chan: self.clone() } }
 
     fn inner(&self) -> &Inner<T> {
@@ -478,7 +887,7 @@ impl<T> Channel<T> {
                 ChannelType::Async,
             )
         } else if size == 0 {
-            (UserData::One(None), ChannelType::Unbuffered)
+            (UserData::One(None), ChannelType::Rendezvous)
         } else {
             let mut queue = Vec::with_capacity(size);
             for _ in 0..size { queue.push(None); }
@@ -530,6 +939,63 @@ impl<T> Inner<T> {
         self.notify.notify();
     }
 
+    // The following are all of the core channel operations wrapped up in a
+    // pretty bow. They all follow a reasonably similar pattern (with the
+    // rendezvous `send` diverging the most) which is roughly:
+    //
+    // 1. Accept locked access to the channel's data.
+    // 2. Check if the operation can continue. (For sends, we block if the
+    //    buffer is full. For receives, we block if the buffer is empty.)
+    // 2a. If we need to block, then we release the mutex given to us and
+    //     block on a condition variable.
+    // 2b. When awoken, go to (2).
+    // 3. If we don't need to block, then we are guaranteed to synchronize*
+    //    either by adding a value to the buffer or removing a value.
+    // 4. Wake all other senders and receivers that are blocked on the
+    //    same condition variable mentioned in (2a).
+    //
+    // * Not true for sending on rendezvous channels, since we need to make
+    // sure that a recv consumes the value.
+    //
+    // Interestingly, the recv operation for all three types of channels
+    // is exactly the same (modulo the underlying data structure).
+
+    fn recv<'a>(
+        &'a self,
+        mut data: MutexGuard<'a, Data<T>>,
+        try: bool,
+    ) -> RecvOp<'a, T> {
+        while data.user.len() == 0 {
+            if data.closed {
+                return RecvOp::closed(data);
+            }
+            if try {
+                return RecvOp::blocked(data);
+            }
+            if self.ty == ChannelType::Rendezvous {
+                self.notify();
+            }
+            data.waiting_recv += 1;
+            data = self.cond.wait(data).unwrap();
+            data.waiting_recv -= 1;
+        }
+        let val = data.user.pop();
+        self.notify();
+        RecvOp::ok(data, val)
+    }
+
+    // The asynchronous send is the easiest. Just push the data and notify.
+    fn async_send<'a>(
+        &'a self,
+        mut data: MutexGuard<'a, Data<T>>,
+        val: T,
+    ) -> SendOp<'a, T> {
+        data.user.push(val);
+        self.notify();
+        SendOp::ok(data)
+    }
+
+    // Buffered send is pretty much the dual of recv.
     fn buffered_send<'a>(
         &'a self,
         mut data: MutexGuard<'a, Data<T>>,
@@ -553,26 +1019,15 @@ impl<T> Inner<T> {
         SendOp::ok(data)
     }
 
-    fn buffered_recv<'a>(
-        &'a self,
-        mut data: MutexGuard<'a, Data<T>>,
-        try: bool,
-    ) -> RecvOp<'a, T> {
-        while data.user.len() == 0 {
-            if data.closed {
-                return RecvOp::closed(data);
-            }
-            if try {
-                return RecvOp::blocked(data);
-            }
-            data = self.cond.wait(data).unwrap();
-        }
-        self.notify();
-        let val = data.user.pop();
-        RecvOp::ok(data, val)
-    }
-
-    fn unbuffered_send<'a>(
+    // Rendezvous send is the trickiest because we need to:
+    //
+    //  1) Make sure no other senders interfere. We do this by ensuring
+    //     that there are no other waiting senders before trying to
+    //     synchronize with a receiver.
+    //  2) Wait for a receiver to consume the sent value. We do this by
+    //     waiting on the condition variable until the value we put
+    //     in the buffer is gone.
+    fn rendezvous_send<'a>(
         &'a self,
         mut data: MutexGuard<'a, Data<T>>,
         try: bool,
@@ -584,6 +1039,7 @@ impl<T> Inner<T> {
             }
             data = self.cond.wait(data).unwrap();
         }
+        // invariant: at most one sender can be here.
         if data.closed {
             return SendOp::closed(data, val);
         }
@@ -591,65 +1047,18 @@ impl<T> Inner<T> {
             return SendOp::blocked(data, val);
         }
         data.user.push(val);
+        // We need to wake up any blocked receivers so they get a chance to
+        // grab the value we pushed.
         self.notify();
         while data.user.len() == 1 {
             data.waiting_send += 1;
             data = self.cond.wait(data).unwrap();
             data.waiting_send -= 1;
         }
+        // And now we need to make sure we wake up any previous blocked
+        // senders so they get a shot at synchronizing.
         self.notify();
         SendOp::ok(data)
-    }
-
-    fn unbuffered_recv<'a>(
-        &'a self,
-        mut data: MutexGuard<'a, Data<T>>,
-        try: bool,
-    ) -> RecvOp<'a, T> {
-        while data.user.len() == 0 {
-            if data.closed {
-                return RecvOp::closed(data);
-            }
-            if try {
-                return RecvOp::blocked(data);
-            }
-            self.notify();
-            data.waiting_recv += 1;
-            data = self.cond.wait(data).unwrap();
-            data.waiting_recv -= 1;
-        }
-        let val = data.user.pop();
-        self.notify();
-        RecvOp::ok(data, val)
-    }
-
-    fn async_send<'a>(
-        &'a self,
-        mut data: MutexGuard<'a, Data<T>>,
-        val: T,
-    ) -> SendOp<'a, T> {
-        data.user.push(val);
-        self.notify();
-        SendOp::ok(data)
-    }
-
-    fn async_recv<'a>(
-        &'a self,
-        mut data: MutexGuard<'a, Data<T>>,
-        try: bool,
-    ) -> RecvOp<'a, T> {
-        while data.user.len() == 0 {
-            if data.closed {
-                return RecvOp::closed(data);
-            }
-            if try {
-                return RecvOp::blocked(data);
-            }
-            data = self.cond.wait(data).unwrap();
-        }
-        let val = data.user.pop();
-        self.notify();
-        RecvOp::ok(data, val)
     }
 }
 
@@ -718,8 +1127,14 @@ impl<'a, T> SendOp<'a, T> {
             SendOpKind::Ok => (self.lock, Ok(())),
             SendOpKind::WouldBlock(val) => (self.lock, Err(val)),
             SendOpKind::Closed(_) => {
-                // I think this case cannot happen.
-                drop(self.lock);
+                // If we're here, then there was a `send` on a closed
+                // channel. But the only way a channel gets closed is if
+                // all values that can `send` have been dropped.
+                //
+                // Unless there's a way to cause a destructor to run while
+                // still retaining a valid reference to the sender, this should
+                // be impossible (or there's a bug in my code).
+                drop(self.lock); // avoid poisoning?
                 panic!("cannot send on a closed channel");
             }
         }
@@ -827,6 +1242,130 @@ impl<T: fmt::Debug> fmt::Debug for Inner<T> {
     }
 }
 
+/// Synchronize on at most one channel send or receive operation.
+///
+/// This is a *heterogeneous* select. Namely, it supports any mix of
+/// asynchronous, synchronous or rendezvous channels, any mix of send or
+/// receive operations and any mix of types on channels.
+///
+/// Here is how select operates:
+///
+/// 1. It first examines all send and receive operations. If one or more of
+/// them can succeed without blocking, then it randomly selects *one*,
+/// executes the operation and runs the code in the corresponding arm.
+/// 2. If all operations are blocked and there is a `default` arm, then the
+/// code in the `default` arm is executed.
+/// 3. If all operations are blocked and there is no `default` arm, then
+/// `Select` will subscribe to all channels involved. `Select` will be
+/// notified when state in one of the channels has changed. This will wake
+/// `Select` up, and it will retry the steps in (1). If all operations remain
+/// blocked, then (3) is repeated.
+///
+///
+/// # Example
+///
+/// Which one synchronizes first?
+///
+/// ```
+/// # #[macro_use] extern crate chan; fn main() {
+/// use std::thread;
+///
+/// let (asend, arecv) = chan::sync(0);
+/// let (bsend, brecv) = chan::sync(0);
+///
+/// thread::spawn(move || asend.send(5));
+/// thread::spawn(move || brecv.recv());
+///
+/// chan_select! {
+///     arecv.recv() -> val => {
+///         println!("arecv received: {:?}", val);
+///     },
+///     bsend.send(10) => {
+///         println!("bsend sent");
+///     },
+/// }
+/// # }
+/// ```
+///
+/// See the "failure modes" section below for more examples of the syntax.
+///
+///
+/// # Example: empty select
+///
+/// An empty select, `chan_select! {}` will block indefinitely.
+///
+///
+/// # Warning
+///
+/// `chan_select!` is simultaneously the most wonderful and horrifying thing
+/// in this crate.
+///
+/// It is wonderful because it is essential for the
+/// composition of channel operations in a concurrent program. Without select,
+/// channels becomes much less expressive.
+///
+/// It is horrifying because the macro used to define it is *extremely*
+/// sensitive. My hope is that it is simply my own lack of creativity at fault
+/// and that others can help me fix it, but we may just be fundamentally stuck
+/// with something like this until a proper compiler plugin can rescue us.
+///
+///
+/// # Failure modes
+///
+/// When I say that this macro is sensitive, what I mean is, "if you misstep
+/// on the syntax, you will be slapped upside the head with an irrelevant
+/// error message."
+///
+/// Consider this:
+///
+/// ```ignore
+/// chan_select! {
+///     default => { println!("   ."); thread::sleep_ms(50); }
+///     tick.recv() => println!("tick."),
+///     boom.recv() => { println!("BOOM!"); return; },
+/// }
+/// ```
+///
+/// The compiler will tell you that the "recursion limit reached while
+/// expanding the macro."
+///
+/// The actual problem is that **every** arm requires a trailing comma,
+/// regardless of whether the arm is wrapped in a `{ ... }` or not. So it
+/// should be written `default => { ... },`. (I'm told that various highly
+/// skilled individuals could remove this restriction.)
+///
+/// Here's another. Can you spot the problem? I swear it's not commas this
+/// time.
+///
+/// ```ignore
+/// chan_select! {
+///     tick.recv() => println!("tick."),
+///     boom.recv() => { println!("BOOM!"); return; },
+///     default => { println!("   ."); thread::sleep_ms(50); },
+/// }
+/// ```
+///
+/// This produces the same "recursion limit" error as above.
+///
+/// The actual problem is that the `default` arm *must* come first (or it must
+/// be omitted completely).
+///
+/// Yet another:
+///
+/// ```ignore
+/// chan_select! {
+///     default => { println!("   ."); thread::sleep_ms(50); },
+///     tick().recv() => println!("tick."),
+///     boom.recv() => { println!("BOOM!"); return; },
+/// }
+/// ```
+///
+/// Again, you'll get the same "recursion limit" error.
+///
+/// The actual problem is that the channel operations must be of the form
+/// `ident.recv()` or `ident.send()`. You cannot use an arbitrary expression
+/// in place of `ident` that evaluates to a channel! To fix this, you must
+/// rebind `tick()` to an identifier outside of `chan_select!`.
 #[macro_export]
 macro_rules! chan_select {
     ($select:ident, default => $default:expr, $(
@@ -904,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn simple_unbuffered() {
+    fn simple_rendezvous() {
         let (send, recv) = sync(0);
         thread::spawn(move || send.send(5));
         assert_eq!(recv.recv(), Some(5));
@@ -930,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn simple_iter_unbuffered() {
+    fn simple_iter_rendezvous() {
         let (send, recv) = sync(0);
         thread::spawn(move || {
             for i in 0..100 {
@@ -961,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn simple_try_unbuffered() {
+    fn simple_try_rendezvous() {
         let (send, recv) = sync(0);
         send.try_send(5).is_err();
         recv.try_recv().is_err();
