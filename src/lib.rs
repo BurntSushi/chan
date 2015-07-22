@@ -614,10 +614,10 @@ pub fn tick_ms(duration: u32) -> Receiver<Sender<()>> {
 /// For any `s: Sender<T>`, `s.id() == s.clone().id()`. Similarly for
 /// any `r: Receiver<T>`.
 #[doc(hidden)]
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ChannelId(ChannelKey);
 
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum ChannelKey {
     Sender(u64),
     Receiver(u64),
