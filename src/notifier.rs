@@ -65,6 +65,12 @@ impl Notifier {
         let mut notify = self.0.write().unwrap();
         notify.subscriptions.remove(&key);
     }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        let notify = self.0.read().unwrap();
+        notify.subscriptions.len()
+    }
 }
 
 impl fmt::Debug for Notifier {

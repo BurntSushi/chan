@@ -63,7 +63,7 @@ pub struct SelectRecvHandle<'r, T: 'r> {
 /// select.
 trait Choice {
     /// Subscribe the owning `Select` to the channel in this choice.
-    fn subscribe(&self, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64;
+    fn subscribe(&mut self, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>);
     /// Unsubscribe the owning `Select` from the channel in this choice.
     fn unsubscribe(&self);
     /// Return the subscription identifier.
@@ -153,7 +153,7 @@ impl<'c> Select<'c> {
         // tell all of our channels to notify us when something
         // changes.
         if !self.is_subscribed() {
-            for (_, choice) in &self.choices {
+            for (_, choice) in &mut self.choices {
                 choice.subscribe(self.cond_mutex.clone(), self.cond.clone());
             }
         }
@@ -277,8 +277,8 @@ impl<'c> Drop for Select<'c> {
 }
 
 impl<'s, T> Choice for SendChoice<'s, T> {
-    fn subscribe(&self, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64 {
-        self.chan.inner().notify.subscribe(mutex, condvar)
+    fn subscribe(&mut self, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) {
+        self.id = Some(self.chan.inner().notify.subscribe(mutex, condvar));
     }
 
     fn unsubscribe(&self) {
@@ -325,11 +325,12 @@ impl<'s, T> Choice for SendChoice<'s, T> {
 }
 
 impl<'r, T> Choice for RecvChoice<'r, T> {
-    fn subscribe(&self, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) -> u64 {
-        self.chan.inner().notify.subscribe(mutex, condvar)
+    fn subscribe(&mut self, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>) {
+        self.id = Some(self.chan.inner().notify.subscribe(mutex, condvar));
     }
 
     fn unsubscribe(&self) {
+        println!("unsubscribing recv: {:?}", self.id);
         match self.id {
             Some(id) => self.chan.inner().notify.unsubscribe(id),
             None => {}

@@ -1672,6 +1672,60 @@ mod tests {
         println!("select done!");
     }
 
+    // Regression test: https://github.com/BurntSushi/chan/issues/6
+    #[test]
+    fn select_no_leak_recv() {
+        let (s0, r0) = sync::<i32>(0);
+        let s1 = s0.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            s1.send(1);
+        });
+
+        // No subscriptions made yet.
+        assert_eq!(s0.inner().notify.len(), 0);
+
+        {
+            let mut sel = ::Select::new();
+            let mut sel = &mut sel;
+            let c = sel.recv(&r0);
+            assert_eq!(c.id(), sel.select());
+            // Select hasn't been dropped yet and therefore hasn't
+            // unsubscribed.
+            assert_eq!(s0.inner().notify.len(), 1);
+        }
+
+        // Select should have been dropped and should have unsubscribed itself.
+        assert_eq!(s0.inner().notify.len(), 0);
+    }
+
+    // Regression test: https://github.com/BurntSushi/chan/issues/6
+    #[test]
+    fn select_no_leak_send() {
+        let (s0, r0) = sync::<i32>(0);
+        let r1 = r0.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            r1.recv();
+        });
+
+        // No subscriptions made yet.
+        assert_eq!(s0.inner().notify.len(), 0);
+
+        {
+            let mut sel = ::Select::new();
+            let mut sel = &mut sel;
+            let c = sel.send(&s0, 1);
+            assert_eq!(c.id(), sel.select());
+            // Select hasn't been dropped yet and therefore hasn't
+            // unsubscribed.
+            assert_eq!(s0.inner().notify.len(), 1);
+        }
+
+        // Select should have been dropped and should have unsubscribed itself.
+        assert_eq!(s0.inner().notify.len(), 0);
+    }
+
     #[test]
     fn mpmc() {
         let (send, recv) = sync(1);
