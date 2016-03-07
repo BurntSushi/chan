@@ -4,6 +4,7 @@
 extern crate chan;
 
 use std::thread;
+use std::time::Duration;
 
 use chan::{Receiver, Sender};
 
@@ -15,7 +16,7 @@ fn main() {
 
     thread::spawn(move || client(free_recv, serv_send));
     thread::spawn(move || server(free_send, serv_recv));
-    thread::sleep_ms(500);
+    thread::sleep(Duration::from_millis(500));
 }
 
 fn client(free_list: Receiver<Buffer>, server_chan: Sender<Buffer>) {

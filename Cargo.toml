@@ -13,10 +13,6 @@ license = "Unlicense/MIT"
 [dependencies]
 rand = "0.3"
 
-[[test]]
-name = "test"
-path = "src/lib.rs"
-
 [features]
 nightly = []
 

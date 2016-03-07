@@ -12,6 +12,7 @@
 extern crate chan;
 
 use std::thread;
+use std::time::Duration;
 
 fn main() {
     let (s1, r1) = chan::sync(0);
@@ -23,14 +24,14 @@ fn main() {
     thread::spawn(move || {
         for i in 0..10 {
             s1.send(i);
-            thread::sleep_ms(10);
+            thread::sleep(Duration::from_millis(10));
         }
         wg1.done();
     });
     thread::spawn(move || {
         for i in 0..10 {
             s2.send(i * 5);
-            thread::sleep_ms(100);
+            thread::sleep(Duration::from_millis(100));
         }
         wg2.done();
     });

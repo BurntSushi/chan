@@ -405,6 +405,7 @@ use std::ops::Drop;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use notifier::Notifier;
 pub use select::{Select, SelectRecvHandle, SelectSendHandle};
@@ -527,6 +528,27 @@ pub fn async<T>() -> (Sender<T>, Receiver<T>) {
 
 /// Creates a new rendezvous channel that is dropped after a timeout.
 ///
+/// When the channel is dropped, any receive operation on the returned channel
+/// will be unblocked.
+///
+/// # Example
+///
+/// ```
+/// let wait = chan::after_ms(1000);
+/// // Unblocks after 1 second.
+/// wait.recv();
+/// ```
+pub fn after(duration: Duration) -> Receiver<()> {
+    let (send, recv) = sync(0);
+    thread::spawn(move || {
+        thread::sleep(duration);
+        drop(send);
+    });
+    recv
+}
+
+/// Creates a new rendezvous channel that is dropped after a timeout.
+///
 /// `duration` is specified in milliseconds.
 ///
 /// When the channel is dropped, any receive operation on the returned channel
@@ -542,11 +564,73 @@ pub fn async<T>() -> (Sender<T>, Receiver<T>) {
 /// wait.recv();
 /// ```
 pub fn after_ms(duration: u32) -> Receiver<()> {
+    #![allow(deprecated)]
     let (send, recv) = sync(0);
     thread::spawn(move || {
         thread::sleep_ms(duration);
         drop(send);
     });
+    recv
+}
+
+/// Creates a new rendezvous channel that is "ticked" every duration.
+///
+/// When `duration` is `0`, no ticks are ever sent.
+///
+/// When `duration` is non-zero, then a new channel is created and sent at
+/// every duration. When the sent channel is dropped, the timer is reset
+/// and the process repeats after the duration.
+///
+/// This is especially convenient because it keeps the ticking in sync with
+/// the code that uses it. Namely, the ticks won't "build up."
+///
+/// N.B. There is no way to reclaim the resources used by this function.
+/// If you stop receiving on the channel returned, then the thread spawned by
+/// `tick_ms` will block indefinitely.
+///
+/// # Examples
+///
+/// This is most useful when used in `chan_select!` because the received
+/// sentinel channel gets dropped only after the correspond arm has
+/// executed. At which point, the ticker is reset and waits to tick until
+/// `duration` milliseconds lapses *after* the `chan_select!` arm is executed.
+///
+/// ```
+/// # #[macro_use] extern crate chan; fn main() {
+/// use std::thread;
+/// use std::time::Duration;
+///
+/// let tick = chan::tick(Duration::from_millis(100));
+/// let boom = chan::after(Duration::from_millis(500));
+/// loop {
+///     chan_select! {
+///         default => {
+///             println!("   .");
+///             thread::sleep(Duration::from_millis(50));
+///         },
+///         tick.recv() => println!("tick."),
+///         boom.recv() => { println!("BOOM!"); return; },
+///     }
+/// }
+/// # }
+/// ```
+pub fn tick(duration: Duration) -> Receiver<Sender<()>> {
+    let (send, recv) = sync(0);
+    if duration.as_secs() == 0 && duration.subsec_nanos() == 0 {
+        // Leak the send channel so that it never gets closed and
+        // `recv` never synchronizes.
+        ::std::mem::forget(send);
+    } else {
+        thread::spawn(move || {
+            loop {
+                thread::sleep(duration);
+                let (sdone, rdone) = sync(0);
+                send.send(sdone);
+                // Block until `sdone` gets closed by the caller.
+                rdone.recv();
+            }
+        });
+    }
     recv
 }
 
@@ -577,12 +661,16 @@ pub fn after_ms(duration: u32) -> Receiver<()> {
 /// ```
 /// # #[macro_use] extern crate chan; fn main() {
 /// use std::thread;
+/// use std::time::Duration;
 ///
 /// let tick = chan::tick_ms(100);
 /// let boom = chan::after_ms(500);
 /// loop {
 ///     chan_select! {
-///         default => { println!("   ."); thread::sleep_ms(50); },
+///         default => {
+///             println!("   .");
+///             thread::sleep(Duration::from_millis(50));
+///         },
 ///         tick.recv() => println!("tick."),
 ///         boom.recv() => { println!("BOOM!"); return; },
 ///     }
@@ -590,6 +678,7 @@ pub fn after_ms(duration: u32) -> Receiver<()> {
 /// # }
 /// ```
 pub fn tick_ms(duration: u32) -> Receiver<Sender<()>> {
+    #![allow(deprecated)]
     let (send, recv) = sync(0);
     if duration == 0 {
         // Leak the send channel so that it never gets closed and
@@ -1320,7 +1409,10 @@ impl<T: fmt::Debug> fmt::Debug for Inner<T> {
 ///
 /// ```ignore
 /// chan_select! {
-///     default => { println!("   ."); thread::sleep_ms(50); }
+///     default => {
+///         println!("   .");
+///         thread::sleep(Duration::from_millis(50));
+///     }
 ///     tick.recv() => println!("tick."),
 ///     boom.recv() => { println!("BOOM!"); return; },
 /// }
@@ -1341,7 +1433,10 @@ impl<T: fmt::Debug> fmt::Debug for Inner<T> {
 /// chan_select! {
 ///     tick.recv() => println!("tick."),
 ///     boom.recv() => { println!("BOOM!"); return; },
-///     default => { println!("   ."); thread::sleep_ms(50); },
+///     default => {
+///         println!("   .");
+///         thread::sleep(Duration::from_millis(50));
+///     },
 /// }
 /// ```
 ///
@@ -1354,7 +1449,10 @@ impl<T: fmt::Debug> fmt::Debug for Inner<T> {
 ///
 /// ```ignore
 /// chan_select! {
-///     default => { println!("   ."); thread::sleep_ms(50); },
+///     default => {
+///         println!("   .");
+///         thread::sleep(Duration::from_millis(50));
+///     },
 ///     tick().recv() => println!("tick."),
 ///     boom.recv() => { println!("BOOM!"); return; },
 /// }
@@ -1432,6 +1530,7 @@ macro_rules! chan_select {
 #[cfg(test)]
 mod tests {
     use std::thread;
+    use std::time::Duration;
 
     use super::{WaitGroup, async, sync};
 
@@ -1543,18 +1642,18 @@ mod tests {
         thread::spawn(move || {
             loop {
                 sticka.send("ticka");
-                thread::sleep_ms(100);
+                thread::sleep(Duration::from_millis(100));
                 println!("RECV: {:?}", recv.recv());
             }
         });
         thread::spawn(move || {
             loop {
                 stickb.send("tickb");
-                thread::sleep_ms(50);
+                thread::sleep(Duration::from_millis(50));
             }
         });
         thread::spawn(move || {
-            thread::sleep_ms(1000);
+            thread::sleep(Duration::from_millis(1000));
             stickc.send(());
         });
 
