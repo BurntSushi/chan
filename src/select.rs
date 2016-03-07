@@ -330,7 +330,6 @@ impl<'r, T> Choice for RecvChoice<'r, T> {
     }
 
     fn unsubscribe(&self) {
-        println!("unsubscribing recv: {:?}", self.id);
         match self.id {
             Some(id) => self.chan.inner().notify.unsubscribe(id),
             None => {}
