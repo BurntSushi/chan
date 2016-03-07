@@ -17,4 +17,4 @@ rand = "0.3"
 nightly = []
 
 [dev-dependencies]
-hyper = { version = "*" }
+hyper = { version = "0.7" }
