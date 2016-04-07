@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::hash_map::{HashMap, Entry};
+use std::collections::btree_map::{BTreeMap, Entry};
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
@@ -26,7 +26,7 @@ pub struct Select<'c> {
     /// A mutex for guarding notification from channels.
     cond_mutex: Arc<Mutex<()>>,
     /// The set of all arms.
-    choices: HashMap<ChannelId, Box<Choice + 'c>>,
+    choices: BTreeMap<ChannelId, Box<Choice + 'c>>,
     /// Scratch space for quickly shuffling the order in which we try to
     /// synchronize an operation in select.
     ids: Option<Vec<ChannelId>>,
@@ -98,7 +98,7 @@ impl<'c> Select<'c> {
         Select {
             cond: Arc::new(Condvar::new()),
             cond_mutex: Arc::new(Mutex::new(())),
-            choices: HashMap::new(),
+            choices: BTreeMap::new(),
             ids: None,
         }
     }
@@ -124,7 +124,7 @@ impl<'c> Select<'c> {
     fn maybe_try_select(&mut self, try: bool) -> Option<ChannelId> {
         fn try_sync<'c>(
             ids: &mut Option<Vec<ChannelId>>,
-            choices: &mut HashMap<ChannelId, Box<Choice + 'c>>,
+            choices: &mut BTreeMap<ChannelId, Box<Choice + 'c>>,
         ) -> Option<ChannelId> {
             let mut ids = ids.as_mut().unwrap();
             rand::thread_rng().shuffle(ids);
