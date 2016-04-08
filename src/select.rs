@@ -191,27 +191,22 @@ impl<'c> Select<'c> {
         // the `Select` and block. This guarantees that notifications to this
         // `Select` are synchronized with waiting on the condition variable.
         //
-        // Once the condition variable is notified, we immediately lock the
-        // channels and repeat the process.
-        for (_, choice) in &mut self.choices {
-            choice.lock();
-        }
-        let mut cond_lock;
+        // Once the condition variable is notified, we repeat the process.
         loop {
+            for (_, choice) in &mut self.choices {
+                choice.lock();
+            }
             if let Some(key) = try_sync(&mut self.ids, &mut self.choices) {
                 for (_, choice) in &mut self.choices {
                     choice.unlock();
                 }
                 return Some(key);
             }
-            cond_lock = self.cond_mutex.lock().unwrap();
+            let cond_lock = self.cond_mutex.lock().unwrap();
             for (_, choice) in &mut self.choices {
                 choice.unlock();
             }
             drop(self.cond.wait(cond_lock).unwrap());
-            for (_, choice) in &mut self.choices {
-                choice.lock();
-            }
         }
     }
 
