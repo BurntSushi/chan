@@ -126,9 +126,14 @@ impl<'c> Select<'c> {
             ids: &mut Option<Vec<ChannelId>>,
             choices: &mut BTreeMap<ChannelId, Box<Choice + 'c>>,
         ) -> Option<ChannelId> {
-            let mut ids = ids.as_mut().unwrap();
-            rand::thread_rng().shuffle(ids);
-            for key in ids {
+            let ids = ids.as_mut().unwrap();
+            let iter = if ids.len() > 1 {
+                let rotate = rand::thread_rng().gen::<usize>() % ids.len();
+                ids.iter().cycle().skip(rotate).take(ids.len())
+            } else {
+                ids.iter().cycle().skip(0).take(ids.len())
+            };
+            for key in iter {
                 if choices.get_mut(key).unwrap().try() {
                     return Some(*key);
                 }
