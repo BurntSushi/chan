@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex};
 
-/// WaitGroup provides synchronization on the completion of threads.
+/// `WaitGroup` provides synchronization on the completion of threads.
 ///
 /// For each thread involved in the synchronization, `add(1)` should be
 /// called. Just before a thread terminates, it should call `done`.
