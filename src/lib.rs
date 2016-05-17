@@ -14,7 +14,7 @@ Asynchronous channels are created with `chan::async()`. Synchronous channels
 are created with `chan::sync(k)` where `k` is the buffer size. Rendezvous
 channels are created with `chan::sync(0)`.
 
-all channels are split into the same two types upon creation: a `Sender` and
+All channels are split into the same two types upon creation: a `Sender` and
 a `Receiver`. Additional senders and receivers can be created with reckless
 abandon by calling `clone`.
 
@@ -230,9 +230,9 @@ fn main() {
 }
 ```
 
-We no longer need to explicitly do anything with the `done` channel. We give
+We no longer need to explicitly do anything with the `_done` channel. We give
 `do_work` ownership of the channel, but as soon as the function stops
-executing, `done` is dropped, the channel is closed and `rdone.recv()`
+executing, `_done` is dropped, the channel is closed and `rdone.recv()`
 unblocks.
 
 
@@ -383,7 +383,7 @@ In terms of writing code:
 3. `chan` does not expose `len` or `cap` methods. (For no reason other than
    to start with a totally minimal API. In particular, calling `len` or `cap`
    on a channel is often The Wrong Thing. But not always. So this restriction
-   will probably be lifted.)
+   may be lifted in the future.)
 4. In `chan`, all channels are either senders or receivers. There is no
    "bidirectional" channel. This is manifest in how channel memory is managed:
    channels are closed when all senders are dropped.

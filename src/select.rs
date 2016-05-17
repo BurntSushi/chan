@@ -120,7 +120,6 @@ impl<'c> Select<'c> {
         self.maybe_try_select(true)
     }
 
-    #[allow(unused_assignments)]
     fn maybe_try_select(&mut self, try: bool) -> Option<ChannelId> {
         fn try_sync<'c>(
             ids: &mut Option<Vec<ChannelId>>,
@@ -277,9 +276,8 @@ impl<'s, T> Choice for SendChoice<'s, T> {
     }
 
     fn unsubscribe(&self) {
-        match self.id {
-            Some(id) => self.chan.inner().notify.unsubscribe(id),
-            None => {}
+        if let Some(id) = self.id {
+            self.chan.inner().notify.unsubscribe(id)
         }
     }
 
@@ -325,9 +323,8 @@ impl<'r, T> Choice for RecvChoice<'r, T> {
     }
 
     fn unsubscribe(&self) {
-        match self.id {
-            Some(id) => self.chan.inner().notify.unsubscribe(id),
-            None => {}
+        if let Some(id) = self.id {
+            self.chan.inner().notify.unsubscribe(id)
         }
     }
 
@@ -380,7 +377,6 @@ impl<'r, T> SelectRecvHandle<'r, T> {
     ///
     /// Panics if this channel was not chosen to synchronize.
     pub fn into_value(self) -> Option<T> {
-        let val = self.val.borrow_mut().take().unwrap();
-        val
+        self.val.borrow_mut().take().unwrap()
     }
 }
