@@ -210,7 +210,7 @@ impl<'c> Select<'c> {
     }
 
     /// Register a new send operation with the select.
-    pub fn send<'s: 'c, T: 'static>(
+    pub fn send<'s: 'c, T>(
         &mut self,
         chan: &'s Sender<T>,
         val: T,
@@ -236,7 +236,7 @@ impl<'c> Select<'c> {
     }
 
     /// Register a new receive operation with the select.
-    pub fn recv<'r: 'c, T: 'static>(
+    pub fn recv<'r: 'c, T>(
         &mut self,
         chan: &'r Receiver<T>,
     ) -> SelectRecvHandle<'r, T> {
