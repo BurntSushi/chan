@@ -394,6 +394,7 @@ authors has done substantial research on the integration of CSP and programming
 languages.
 */
 
+#![deny(warnings)]
 #![deny(missing_docs)]
 
 extern crate rand;
@@ -1500,7 +1501,7 @@ macro_rules! chan_select {
         $chan:ident.$meth:ident($($send:expr)*)
         $(-> $name:pat)* => $code:expr
     ),+) => {{
-        let mut sel = &mut $select;
+        let sel = &mut $select;
         $(let $chan = sel.$meth(&$chan $(, $send)*);)+
         let which = sel.select();
         $(if which == $chan.id() {
@@ -1620,7 +1621,7 @@ mod tests {
         s2.send(2);
 
         let mut sel = ::Select::new();
-        let mut sel = &mut sel;
+        let sel = &mut sel;
         let c1 = sel.recv(&r1);
         let c2 = sel.recv(&r2);
         let which = sel.select();
@@ -1687,7 +1688,7 @@ mod tests {
 
         {
             let mut sel = ::Select::new();
-            let mut sel = &mut sel;
+            let sel = &mut sel;
             let c = sel.recv(&r0);
             assert_eq!(c.id(), sel.select());
             // Select hasn't been dropped yet and therefore hasn't
@@ -1714,7 +1715,7 @@ mod tests {
 
         {
             let mut sel = ::Select::new();
-            let mut sel = &mut sel;
+            let sel = &mut sel;
             let c = sel.send(&s0, 1);
             assert_eq!(c.id(), sel.select());
             // Select hasn't been dropped yet and therefore hasn't
