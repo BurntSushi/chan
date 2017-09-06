@@ -8,6 +8,7 @@
 // the beginning with few receives on r2. Once r1 is exhausted, r2 is finally
 // allowed to consume data.
 
+#![deny(warnings)]
 #[macro_use]
 extern crate chan;
 

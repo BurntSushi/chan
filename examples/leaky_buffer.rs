@@ -1,5 +1,6 @@
 // From http://golang.org/doc/effective_go.html#leaky_buffer
 
+#![deny(warnings)]
 #[macro_use]
 extern crate chan;
 
