@@ -1545,40 +1545,40 @@ macro_rules! chan_select {
         $chan:ident$(($($dontcare:expr)*))*.$meth:ident($($send:expr)*)
         $(-> $name:pat)* => $code:expr
     ),+$(,)*) => {
-        compile_error!("Error: The channel name in each case must be a simple identifier, not a function call.  At least one of the cases violates this rule.");
+        compile_error!("The channel name in each case must be a simple identifier, not a function call.  At least one of the cases violates this rule.");
     };
     (default => $default:expr, $(
         $chan:ident$(($($dontcare:expr)*))*.$meth:ident($($send:expr)*)
         $(-> $name:pat)* => $code:expr
     ),+$(,)*) => {
-        compile_error!("Error: The channel name in each case must be a simple identifier, not a function call.  At least one of the cases violates this rule.");
+        compile_error!("The channel name in each case must be a simple identifier, not a function call.  At least one of the cases violates this rule.");
     };
 
     ($select:ident, default => $default:expr, $(
         $($chan:ident$(($($dontcare:expr)*))*).+
         $(-> $name:pat)* => $code:expr
     ),+$(,)*) => {
-        compile_error!("Error: The channel name in each case must be a simple identifier, not a function call, and you cannot access any members of that identifier other than the method (e.g. recv()). At least one of the cases violates this rule.");
+        compile_error!("The channel name in each case must be a simple identifier, not a function call, and you cannot access any members of that identifier other than the method (e.g. recv()). At least one of the cases violates this rule.");
     };
     (default => $default:expr, $(
         $($chan:ident$(($($dontcare:expr)*))*).+
         $(-> $name:pat)* => $code:expr
     ),+$(,)*) => {
-        compile_error!("Error: The channel name in each case must be a simple identifier, not a function call, and you cannot access any members of that identifier other than the method (e.g. recv()). At least one of the cases violates this rule.");
+        compile_error!("The channel name in each case must be a simple identifier, not a function call, and you cannot access any members of that identifier other than the method (e.g. recv()). At least one of the cases violates this rule.");
     };
 
     ($select:ident, default => $default:expr, $($tt:tt)*) => {
-        compile_error!("Error: There is a comma missing after one of the select cases.");
+        compile_error!("There is a comma missing after one of the select cases.");
     };
     (default => $default:expr, $($tt:tt)*) => {
-        compile_error!("Error: There is a comma missing after one of the select cases.");
+        compile_error!("There is a comma missing after one of the select cases.");
     };
 
     ($select:ident, default => $($tt:tt)*) => {
-        compile_error!("Error: There is a comma missing after the default case.");
+        compile_error!("There is a comma missing after the default case.");
     };
     (default => $($tt:tt)*) => {
-        compile_error!("Error: There is a comma missing after the default case.");
+        compile_error!("There is a comma missing after the default case.");
     };
 }
 
