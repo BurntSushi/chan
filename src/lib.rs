@@ -1475,11 +1475,19 @@ macro_rules! chan_select {
             default => $default,
             $($chan.$meth($($send)*) $(-> $name)* => $code),+);
     };
+    ($select:ident, $(
+        $chan:ident.$meth:ident($($send:expr)*)
+        $(-> $name:pat)* => $code:expr,
+    )+) => {
+        chan_select!(
+            $select,
+            $($chan.$meth($($send)*) $(-> $name)* => $code),+);
+    };
     ($select:ident, default => $default:expr, $(
         $chan:ident.$meth:ident($($send:expr)*)
         $(-> $name:pat)* => $code:expr
     ),+) => {{
-        let mut sel = &mut $select;
+        let sel = &mut $select;
         $(let $chan = sel.$meth(&$chan $(, $send)*);)+
         let which = sel.try_select();
         $(if which == Some($chan.id()) {
@@ -1490,17 +1498,9 @@ macro_rules! chan_select {
     }};
     ($select:ident, $(
         $chan:ident.$meth:ident($($send:expr)*)
-        $(-> $name:pat)* => $code:expr,
-    )+) => {
-        chan_select!(
-            $select,
-            $($chan.$meth($($send)*) $(-> $name)* => $code),+);
-    };
-    ($select:ident, $(
-        $chan:ident.$meth:ident($($send:expr)*)
         $(-> $name:pat)* => $code:expr
     ),+) => {{
-        let mut sel = &mut $select;
+        let sel = &mut $select;
         $(let $chan = sel.$meth(&$chan $(, $send)*);)+
         let which = sel.select();
         $(if which == $chan.id() {
