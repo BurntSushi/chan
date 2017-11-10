@@ -1572,23 +1572,24 @@ macro_rules! chan_select {
     ),+$(,)*) => {
         compile_error!("The channel name in each case must be a simple identifier, not a function call, and you cannot access any members of that identifier other than the method (e.g. recv()). At least one of the cases violates this rule.");
     };
-    ($select:ident, $(
-        $($chan:ident$(($($dontcare:expr)*))*).+
-        $(-> $name:pat)* => $code:expr
-    ),+$(,)*) => {
-        compile_error!("The channel name in each case must be a simple identifier, not a function call, and you cannot access any members of that identifier other than the method (e.g. recv()). At least one of the cases violates this rule.");
-    };
     (default => $default:expr, $(
         $($chan:ident$(($($dontcare:expr)*))*).+
         $(-> $name:pat)* => $code:expr
     ),+$(,)*) => {
         compile_error!("The channel name in each case must be a simple identifier, not a function call, and you cannot access any members of that identifier other than the method (e.g. recv()). At least one of the cases violates this rule.");
     };
+
+    ($select:ident, $(
+        $($chan:ident$(($($dontcare:expr)*))*).+
+        $(-> $name:pat)* => $code:expr
+    ),+$(,)*) => {
+        compile_error!("The channel name in each case must be a simple identifier, not a function call, and you cannot access any members of that identifier other than the method (e.g. recv()). Also, the 'default' case must be the first case. At least one of the cases violates one of these rules.");
+    };
     ($(
         $($chan:ident$(($($dontcare:expr)*))*).+
         $(-> $name:pat)* => $code:expr
     ),+$(,)*) => {
-        compile_error!("The channel name in each case must be a simple identifier, not a function call, and you cannot access any members of that identifier other than the method (e.g. recv()). At least one of the cases violates this rule.");
+        compile_error!("The channel name in each case must be a simple identifier, not a function call, and you cannot access any members of that identifier other than the method (e.g. recv()). Also, the 'default' case must be the first case. At least one of the cases violates one of these rules.");
     };
 
     ($select:ident, default => $default:expr, $($tt:tt)*) => {

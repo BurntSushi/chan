@@ -9,11 +9,11 @@ fn main() {
     let boom = chan::after_ms(500);
     loop {
         chan_select! {
+            tick.recv() => println!("tick."),
             default => {
                 println!("   .");
                 thread::sleep(Duration::from_millis(50));
             },
-            tick.recv() => println!("tick."),
             boom.recv() => { println!("BOOM!"); return; },
         }
     }
