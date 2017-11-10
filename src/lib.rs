@@ -1568,17 +1568,17 @@ macro_rules! chan_select {
     };
 
     ($select:ident, default => $default:expr, $($tt:tt)*) => {
-        compile_error!("Error: There is a comma missing after one of the select cases");
+        compile_error!("Error: There is a comma missing after one of the select cases.");
     };
     (default => $default:expr, $($tt:tt)*) => {
-        compile_error!("Error: There is a comma missing after one of the select cases");
+        compile_error!("Error: There is a comma missing after one of the select cases.");
     };
 
     ($select:ident, default => $($tt:tt)*) => {
-        compile_error!("Error: There is a comma missing after the default case");
+        compile_error!("Error: There is a comma missing after the default case.");
     };
     (default => $($tt:tt)*) => {
-        compile_error!("Error: There is a comma missing after the default case");
+        compile_error!("Error: There is a comma missing after the default case.");
     };
 }
 
