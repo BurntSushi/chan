@@ -11,7 +11,7 @@ keywords = ["channel", "asynchronous", "mpmc", "golang", "select"]
 license = "Unlicense/MIT"
 
 [dependencies]
-rand = "0.3"
+rand = "0.4"
 
 [features]
 nightly = []
