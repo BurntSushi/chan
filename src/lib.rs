@@ -534,7 +534,9 @@ pub fn async<T>() -> (Sender<T>, Receiver<T>) {
 /// # Example
 ///
 /// ```
-/// let wait = chan::after_ms(1000);
+/// use std::time::Duration;
+///
+/// let wait = chan::after(Duration::from_millis(1000));
 /// // Unblocks after 1 second.
 /// wait.recv();
 /// ```
