@@ -1,4 +1,3 @@
-#![deny(warnings)]
 extern crate chan;
 extern crate hyper;
 

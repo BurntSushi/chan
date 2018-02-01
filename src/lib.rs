@@ -394,7 +394,6 @@ authors has done substantial research on the integration of CSP and programming
 languages.
 */
 
-#![deny(warnings)]
 #![deny(missing_docs)]
 
 extern crate rand;
