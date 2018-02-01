@@ -1481,7 +1481,7 @@ macro_rules! chan_select {
         $chan:ident.$meth:ident($($send:expr)*)
         $(-> $name:pat)* => $code:expr
     ),+) => {{
-        let mut sel = &mut $select;
+        let sel = &mut $select;
         $(let $chan = sel.$meth(&$chan $(, $send)*);)+
         let which = sel.try_select();
         $(if which == Some($chan.id()) {
@@ -1502,7 +1502,7 @@ macro_rules! chan_select {
         $chan:ident.$meth:ident($($send:expr)*)
         $(-> $name:pat)* => $code:expr
     ),+) => {{
-        let mut sel = &mut $select;
+        let sel = &mut $select;
         $(let $chan = sel.$meth(&$chan $(, $send)*);)+
         let which = sel.select();
         $(if which == $chan.id() {
@@ -1516,11 +1516,11 @@ macro_rules! chan_select {
     ($select:ident, default => $default:expr) => {{ $default }};
     ($select:ident, default => $default:expr,) => {{ $default }};
     ($select:ident) => {{
-        let mut sel = &mut $select;
+        let sel = &mut $select;
         sel.select(); // blocks forever
     }};
     () => {{
-        let mut sel = $crate::Select::new();
+        let sel = $crate::Select::new();
         chan_select!(sel);
     }};
     ($($tt:tt)*) => {{
