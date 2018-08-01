@@ -59,8 +59,8 @@ pub struct SelectRecvHandle<'r, T: 'r> {
 /// Expose a uniform interface over send and receive operations.
 ///
 /// In particular, this trait is used to *erase* the type parameter in the
-/// `Receiver` and `Sender` types. This is essential to building a hetergeneous
-/// select.
+/// `Receiver` and `Sender` types. This is essential to building a
+/// heterogeneous select.
 trait Choice {
     /// Subscribe the owning `Select` to the channel in this choice.
     fn subscribe(&mut self, mutex: Arc<Mutex<()>>, condvar: Arc<Condvar>);
