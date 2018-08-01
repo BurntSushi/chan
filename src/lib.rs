@@ -871,7 +871,7 @@ enum RecvOpKind<T> {
 impl<T> Sender<T> {
     /// Send a value on this channel.
     ///
-    /// If this is an asnychronous channel, `send` never blocks.
+    /// If this is an asynchronous channel, `send` never blocks.
     ///
     /// If this is a synchronous channel, `send` only blocks when the buffer
     /// is full.
@@ -920,7 +920,7 @@ impl<T> Sender<T> {
 impl<T> Receiver<T> {
     /// Receive a value on this channel.
     ///
-    /// If this is an asnychronous channel, `recv` only blocks when the
+    /// If this is an asynchronous channel, `recv` only blocks when the
     /// buffer is empty.
     ///
     /// If this is a synchronous channel, `recv` only blocks when the buffer
