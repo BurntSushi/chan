@@ -1,9 +1,9 @@
-**This crate has reached its end-of-life and is now deprecated.**
+## **This crate has reached its end-of-life and is now deprecated.**
 
 The intended successor of this crate is the
-[`crossbeam-channel`](https://github.com/crossbeam-rs/crossbeam-channel).
-Its API is strikingly similar, but comes with a much better `select!` macro,
-better performance, a better test suite and an all-around better
+[`crossbeam-channel`](https://github.com/crossbeam-rs/crossbeam-channel)
+crate. Its API is strikingly similar, but comes with a much better `select!`
+macro, better performance, a better test suite and an all-around better
 implementation.
 
 If you were previously using this crate because of `chan-signal`, then it is
