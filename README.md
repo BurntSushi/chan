@@ -1,3 +1,39 @@
+**This crate has reached its end-of-life and is now deprecated.**
+
+The intended successor of this crate is the
+[`crossbeam-channel`](https://github.com/crossbeam-rs/crossbeam-channel).
+Its API is strikingly similar, but comes with a much better `select!` macro,
+better performance, a better test suite and an all-around better
+implementation.
+
+If you were previously using this crate because of `chan-signal`, then it is
+simple to reproduce a similar API with `crossbeam-channel` and the
+[`signal-hook`](https://github.com/vorner/signal-hook)
+crate. For example, here's `chan-signal`'s `notify` function:
+
+```rust
+extern crate crossbeam_channel as channel;
+extern crate signal_hook;
+
+fn notify(signals: &[c_int]) -> Result<channel::Receiver<c_int>> {
+    let (s, r) = channel::bounded(100);
+    let signals = signal_hook::iterator::Signals::new(signals)?;
+    thread::spawn(move || {
+        for signal in signals.forever() {
+            s.send(signal);
+        }
+    });
+    Ok(r)
+}
+```
+
+This crate may continue to receives bug fixes, but should otherwise be
+considered dead.
+
+
+chan
+====
+
 This crate provides experimental support for multi-producer/multi-consumer
 channels. This includes rendezvous, synchronous and asynchronous channels.
 
