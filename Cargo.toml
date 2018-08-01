@@ -2,8 +2,8 @@
 name = "chan"
 version = "0.1.22"  #:version
 authors = ["Andrew Gallant <jamslam@gmail.com>"]
-description = "Multi-producer, multi-consumer channels with select."
-documentation = "http://burntsushi.net/rustdoc/chan/"
+description = "DEPRECATED. Use crossbeam-channel instead."
+documentation = "https://docs.rs/chan"
 homepage = "https://github.com/BurntSushi/chan"
 repository = "https://github.com/BurntSushi/chan"
 readme = "README.md"
