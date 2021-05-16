@@ -1,7 +1,7 @@
 ## **This crate has reached its end-of-life and is now deprecated.**
 
 The intended successor of this crate is the
-[`crossbeam-channel`](https://github.com/crossbeam-rs/crossbeam-channel)
+[`crossbeam-channel`](https://github.com/crossbeam-rs/crossbeam)
 crate. Its API is strikingly similar, but comes with a much better `select!`
 macro, better performance, a better test suite and an all-around better
 implementation.
@@ -12,11 +12,10 @@ simple to reproduce a similar API with `crossbeam-channel` and the
 crate. For example, here's `chan-signal`'s `notify` function:
 
 ```rust
-extern crate crossbeam_channel as channel;
-extern crate signal_hook;
+use crossbeam_channel::Receiver;
 
-fn notify(signals: &[c_int]) -> Result<channel::Receiver<c_int>> {
-    let (s, r) = channel::bounded(100);
+fn notify(signals: &[c_int]) -> Result<Receiver<c_int>> {
+    let (s, r) = crossbeam_channel::bounded(100);
     let signals = signal_hook::iterator::Signals::new(signals)?;
     thread::spawn(move || {
         for signal in signals.forever() {
